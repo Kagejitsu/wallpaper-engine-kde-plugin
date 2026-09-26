@@ -1,6 +1,34 @@
 #include "WPMaterial.h"
+#include "WPUserProperties.hpp"
 
 using namespace wallpaper::wpscene;
+
+namespace
+{
+// "usershadervalues" maps a project.json user property to a shader constant:
+//   { "flagcolor1": "color2" }  ->  constantshadervalues["color2"] = <flagcolor1 value>
+// Applied after constantshadervalues so the user's choice wins over the material default.
+void ApplyUserShaderValues(const nlohmann::json&                                json,
+                           std::unordered_map<std::string, std::vector<float>>& out) {
+    using wallpaper::g_currentUserProperties;
+    if (! json.contains("usershadervalues") || g_currentUserProperties == nullptr) return;
+    for (const auto& jU : json.at("usershadervalues").items()) {
+        if (! jU.value().is_string()) continue;
+        auto prop = g_currentUserProperties->GetProperty(jU.key());
+        if (! prop.has_value()) continue;
+
+        std::vector<float> value;
+        if (prop->is_boolean()) {
+            value = { prop->get<bool>() ? 1.0f : 0.0f };
+        } else if (prop->is_number() || prop->is_string()) {
+            if (! GET_JSON_VALUE(*prop, value)) continue;
+        } else {
+            continue;
+        }
+        out[jU.value().get<std::string>()] = value;
+    }
+}
+} // namespace
 
 bool WPMaterialPassBindItem::FromJson(const nlohmann::json& json) {
     GET_JSON_NAME_VALUE(json, "name", name);
@@ -59,6 +87,7 @@ bool WPMaterialPass::FromJson(const nlohmann::json& json) {
             constantshadervalues[name] = value;
         }
     }
+    ApplyUserShaderValues(json, constantshadervalues);
     if (json.contains("combos")) {
         for (const auto& jC : json.at("combos").items()) {
             std::string name;
@@ -110,6 +139,7 @@ bool WPMaterial::FromJson(const nlohmann::json& json) {
             constantshadervalues[name] = value;
         }
     }
+    ApplyUserShaderValues(jContent, constantshadervalues);
     if (jContent.contains("combos")) {
         for (const auto& jC : jContent.at("combos").items()) {
             std::string name;
