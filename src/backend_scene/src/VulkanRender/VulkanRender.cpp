@@ -20,6 +20,7 @@
 #include "VulkanPass.hpp"
 #include "PrePass.hpp"
 #include "FinPass.hpp"
+#include "CustomShaderPass.hpp"
 #include "Resource.hpp"
 
 #include "Core/ArrayHelper.hpp"
@@ -703,6 +704,11 @@ void VulkanRender::Impl::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
     m_passes.push_back(m_finpass.get());
 
     setRenderTargetSize(scene, rg);
+
+    scene.rt_writer_count.clear();
+    for (auto* p : m_passes) {
+        if (auto* csp = dynamic_cast<CustomShaderPass*>(p)) scene.rt_writer_count[csp->output()]++;
+    }
 
     for (auto* p : m_passes) {
         if (! p->prepared()) {

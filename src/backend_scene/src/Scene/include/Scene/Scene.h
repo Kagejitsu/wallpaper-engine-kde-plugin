@@ -31,6 +31,8 @@ public:
     // (topological order). cache_passes gates the whole optimization.
     bool                                  cache_passes { true };
     std::unordered_map<std::string, bool> rt_frame_static;
+    // how many passes of the current graph write each render target
+    std::unordered_map<std::string, int> rt_writer_count;
 
     std::unordered_map<std::string, std::shared_ptr<SceneCamera>> cameras;
     std::unordered_map<std::string, std::vector<std::string>>     linkedCameras;

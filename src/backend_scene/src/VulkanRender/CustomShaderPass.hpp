@@ -66,6 +66,8 @@ public:
     // Pass is cacheable if static and doesn't use time-based uniforms
     bool isCacheable() const { return isStatic() && ! m_uses_time_uniforms; }
 
+    const std::string& output() const { return m_desc.output; }
+
     // Check if output is already cached and valid
     bool isCached() const { return m_cached; }
     void invalidateCache() { m_cached = false; }

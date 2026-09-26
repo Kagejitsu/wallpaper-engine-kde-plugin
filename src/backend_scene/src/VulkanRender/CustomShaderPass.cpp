@@ -196,9 +196,14 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
                 }
             }
         }
-        auto& out_rt   = scene.renderTargets.at(m_desc.output);
-        m_frame_static = scene.cache_passes && isStatic() && ! m_uses_time_uniforms &&
-                         inputs_static && out_rt.allowReuse;
+        // The output must have no other writer: layer effects ping-pong between
+        // shared buffers, so a later (animated) pass may overwrite it in the same
+        // frame, and skipping this pass would then feed that stale result back in.
+        auto  wit          = scene.rt_writer_count.find(m_desc.output);
+        bool  sole_writer  = wit != scene.rt_writer_count.end() && wit->second == 1;
+        auto& out_rt       = scene.renderTargets.at(m_desc.output);
+        m_frame_static     = scene.cache_passes && isStatic() && ! m_uses_time_uniforms &&
+                         inputs_static && sole_writer && out_rt.allowReuse;
         scene.rt_frame_static[m_desc.output] = m_frame_static;
     }
 
