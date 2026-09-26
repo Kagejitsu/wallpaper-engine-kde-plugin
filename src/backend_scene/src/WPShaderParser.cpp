@@ -19,7 +19,8 @@
 
 static constexpr std::string_view SHADER_PLACEHOLD { "__SHADER_PLACEHOLD__" };
 
-#define SHADER_DIR    "spvs01"
+// bumped: spvs01 held fragment shaders with vertex-only builtins
+#define SHADER_DIR    "spvs02"
 #define SHADER_SUFFIX "spvs"
 
 using namespace wallpaper;
