@@ -45,6 +45,14 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     if (! pfile) return false;
     auto  memfile = fs::MemBinaryStream(*pfile);
     auto& f       = memfile;
+    // Reads past EOF return 0 instead of failing, so every search and every
+    // count taken from the file is checked against what is actually left;
+    // otherwise an unexpected layout spins the loader thread (and plasmashell
+    // hangs joining it).
+    auto remaining = [&f]() -> u64 {
+        const auto left = (i64)f.Size() - (i64)f.Tell();
+        return left > 0 ? (u64)left : 0;
+    };
 
     mdl.mdlv = ReadMDLVesion(f);
 
@@ -69,6 +77,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     if (curr == 0) {
         alt_mdl_format = true;
         while (curr != alt_format_vertex_size_herald_value) {
+            if (remaining() < 4) {
+                LOG_ERROR("mdl '%s': vertex size herald not found", str_path.c_str());
+                return false;
+            }
             curr = f.ReadUint32();
         }
         curr = f.ReadUint32();
@@ -77,6 +89,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     }
 
     uint32_t vertex_size = curr;
+    if (vertex_size > remaining()) {
+        LOG_ERROR("mdl '%s': vertex size %u exceeds file", str_path.c_str(), vertex_size);
+        return false;
+    }
     if (vertex_size % (alt_mdl_format ? alt_singile_vertex : singile_vertex) != 0) {
         LOG_ERROR("unsupport mdl vertex size %d", vertex_size);
         return false;
@@ -97,6 +113,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     }
 
     uint32_t indices_size = f.ReadUint32();
+    if (indices_size > remaining()) {
+        LOG_ERROR("mdl '%s': indices size %u exceeds file", str_path.c_str(), indices_size);
+        return false;
+    }
     if (indices_size % singile_indices != 0) {
         LOG_ERROR("unsupport mdl indices size %d", indices_size);
         return false;
@@ -182,6 +202,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                 for (uint j = 0; j < 16; j++) f.ReadFloat(); // mat
         }
         uint32_t size_unk = f.ReadUint32();
+        if ((u64)size_unk * 12 > remaining()) {
+            LOG_ERROR("mdl '%s': bad section count %u", str_path.c_str(), size_unk);
+            return false;
+        }
         for (uint i = 0; i < size_unk; i++)
             for (int j = 0; j < 3; j++) f.ReadUint32();
 
@@ -211,7 +235,7 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     do {
         // A model without an MDLA (animation) section just ends here; reads past
         // EOF return "" forever, so stop instead of spinning on the loader thread.
-        if (f.Tell() >= (idx)f.Size()) break;
+        if (remaining() == 0) break;
         std::string mdPrefix = f.ReadStr();
 
         // sometimes there can be other garbage in this gap, so we need to
@@ -244,11 +268,15 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
             (void)end_size;
 
             uint anim_num = f.ReadUint32();
+            if (anim_num > remaining()) {
+                LOG_ERROR("mdl '%s': bad animation count %u", str_path.c_str(), anim_num);
+                return false;
+            }
             anims.resize(anim_num);
             for (auto& anim : anims) {
                 // there can be a variable number of 32-bit 0s between animations
                 anim.id = 0;
-                while (anim.id == 0 && f.Tell() < (idx)f.Size()) {
+                while (anim.id == 0 && remaining() >= 4) {
                     anim.id = f.ReadInt32();
                 }
 
@@ -267,12 +295,16 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                 f.ReadInt32();
 
                 uint32_t b_num = f.ReadUint32();
+                if ((u64)b_num * 8 > remaining()) {
+                    LOG_ERROR("mdl '%s': bad bone track count %u", str_path.c_str(), b_num);
+                    return false;
+                }
                 anim.bframes_array.resize(b_num);
                 for (auto& bframes : anim.bframes_array) {
                     f.ReadInt32();
                     uint32_t byte_size = f.ReadUint32();
                     uint32_t num       = byte_size / singile_bone_frame;
-                    if (byte_size % singile_bone_frame != 0) {
+                    if (byte_size > remaining() || byte_size % singile_bone_frame != 0) {
                         LOG_ERROR("wrong bone frame size %d", byte_size);
                         return false;
                     }
@@ -298,6 +330,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                     f.ReadUint8();
                 } else {
                     uint32_t unk_extra_uint = f.ReadUint32();
+                    if ((u64)unk_extra_uint * 5 > remaining()) {
+                        LOG_ERROR("mdl '%s': bad extra count %u", str_path.c_str(), unk_extra_uint);
+                        return false;
+                    }
                     for (uint i = 0; i < unk_extra_uint; i++) {
                         f.ReadFloat();
                         // data is like: {"$$hashKey":"object:2110","frame":1,"name":"random_anim"}
