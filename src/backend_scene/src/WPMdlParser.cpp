@@ -209,6 +209,9 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     std::string mdVersion;
 
     do {
+        // A model without an MDLA (animation) section just ends here; reads past
+        // EOF return "" forever, so stop instead of spinning on the loader thread.
+        if (f.Tell() >= (idx)f.Size()) break;
         std::string mdPrefix = f.ReadStr();
 
         // sometimes there can be other garbage in this gap, so we need to
@@ -245,7 +248,7 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
             for (auto& anim : anims) {
                 // there can be a variable number of 32-bit 0s between animations
                 anim.id = 0;
-                while (anim.id == 0) {
+                while (anim.id == 0 && f.Tell() < (idx)f.Size()) {
                     anim.id = f.ReadInt32();
                 }
 
