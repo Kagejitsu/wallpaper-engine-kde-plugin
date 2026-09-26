@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <set>
 #include "Core/StringHelper.hpp"
 #include "Utils/Sha.hpp"
 #include "Core/MapSet.hpp"
@@ -45,6 +46,55 @@ inline VkShaderStageFlagBits ToVkType(EShLanguage lan) {
 }
 
 inline VkFormat ToVkType(SpvReflectFormat type) { return static_cast<VkFormat>(type); }
+
+// glslang's relaxed Vulkan rules declare gl_VertexIndex/gl_InstanceIndex in every
+// stage. In a non-vertex stage they are invalid (VUID-StandaloneSpirv-Flat-04744,
+// VertexIndex is vertex-only) and unused, so drop their OpName/OpDecorate/OpVariable
+// and their slot in the OpEntryPoint interface.
+void StripVertexOnlyBuiltins(std::vector<unsigned int>& spirv) {
+    constexpr unsigned OpName = 5, OpEntryPoint = 15, OpVariable = 59, OpDecorate = 71;
+    constexpr unsigned DecBuiltIn = 11, BuiltInVertexIndex = 42, BuiltInInstanceIndex = 43;
+    if (spirv.size() < 5) return;
+
+    std::set<unsigned> ids;
+    for (usize i = 5; i < spirv.size();) {
+        const unsigned n = spirv[i] >> 16, op = spirv[i] & 0xFFFF;
+        if (n == 0 || i + n > spirv.size()) return; // malformed, leave untouched
+        if (op == OpDecorate && n >= 4 && spirv[i + 2] == DecBuiltIn &&
+            (spirv[i + 3] == BuiltInVertexIndex || spirv[i + 3] == BuiltInInstanceIndex))
+            ids.insert(spirv[i + 1]);
+        i += n;
+    }
+    if (ids.empty()) return;
+
+    std::vector<unsigned int> out(spirv.begin(), spirv.begin() + 5);
+    for (usize i = 5; i < spirv.size();) {
+        const unsigned n = spirv[i] >> 16, op = spirv[i] & 0xFFFF;
+        bool           drop = false;
+        if ((op == OpName || op == OpDecorate) && n >= 2 && ids.count(spirv[i + 1])) drop = true;
+        if (op == OpVariable && n >= 3 && ids.count(spirv[i + 2])) drop = true;
+        if (op == OpEntryPoint && n >= 4) {
+            // model, entry id, NUL-terminated name (padded to words), then interface ids
+            usize k = i + 3;
+            while (k < i + n) {
+                const unsigned w = spirv[k++];
+                if ((w & 0xFF000000u) == 0 || (w & 0xFF0000u) == 0 || (w & 0xFF00u) == 0 ||
+                    (w & 0xFFu) == 0)
+                    break;
+            }
+            std::vector<unsigned int> ep(spirv.begin() + i, spirv.begin() + k);
+            for (usize j = k; j < i + n; j++)
+                if (! ids.count(spirv[j])) ep.push_back(spirv[j]);
+            ep[0] = ((unsigned)ep.size() << 16) | OpEntryPoint;
+            out.insert(out.end(), ep.begin(), ep.end());
+            drop = true;
+        } else if (! drop) {
+            out.insert(out.end(), spirv.begin() + i, spirv.begin() + i + n);
+        }
+        i += n;
+    }
+    spirv.swap(out);
+}
 
 inline VkShaderStageFlagBits ToVkType(SpvReflectShaderStageFlagBits s) {
     switch (s) {
@@ -450,6 +500,7 @@ bool wallpaper::vulkan::CompileAndLinkShaderUnits(std::span<const ShaderCompUnit
         auto im           = program.getIntermediate(unit.stage);
         im->setOriginUpperLeft();
         glslang::GlslangToSpv(*im, spv->spirv, &logger, &spvOptions);
+        if (unit.stage != EShLangVertex) StripVertexOnlyBuiltins(spv->spirv);
         spvs.emplace_back(std::move(spv));
 
         auto messages = logger.getAllMessages();
