@@ -233,6 +233,27 @@ void FinPass::execute(const Device& device, RenderingResources& rr) {
             .pImageInfo      = &desc_img,
         };
         cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.layout, 0, wset);
+
+        // The canvas was just written by the scene passes (colour attachment) or
+        // cleared/copied (transfer). A render pass's implicit end dependency gives
+        // no visibility to a later sampled read, so make those writes visible here;
+        // without it whole tiles of the last layers drawn were missing from the
+        // presented frame.
+        VkImageMemoryBarrier canvas_bar {
+            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext            = nullptr,
+            .srcAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask    = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .image            = m_desc.vk_result.handle,
+            .subresourceRange = base_srang,
+        };
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            VK_DEPENDENCY_BY_REGION_BIT,
+                            canvas_bar);
     }
 
     // do queue family transfer operation
