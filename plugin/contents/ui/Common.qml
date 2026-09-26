@@ -231,7 +231,10 @@ QtObject {
     }
 
     function packWallpaperSource(model) {
-        return model.path ? `${model.path}/${model.file}+${model.type}` : '';
+        // The source is stored as a URL-typed config entry, where a raw '#' or '?'
+        // in a file name would start a fragment/query and cut the name off.
+        const file = String(model.file).replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F');
+        return model.path ? `${model.path}/${file}+${model.type}` : '';
     }
     function unpackWallpaperSource(source) {
         const match = source.match(regex_source);
@@ -376,7 +379,7 @@ QtObject {
     }
     
     function urlNative(url) {
-        const str = url.toString();
+        const str = url.toString().replace(/%23/g, '#').replace(/%3F/g, '?').replace(/%25/g, '%');
         if(str.startsWith('file://')) {
             return str.slice(7);
         } else if(str.startsWith('file:')) {
