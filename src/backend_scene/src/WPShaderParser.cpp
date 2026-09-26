@@ -54,6 +54,12 @@ static constexpr const char* pre_shader_code = R"(#version 330
 #define float3 vec3
 #define float4 vec4
 #define lerp mix
+#define log10(x) (log2(x) * 0.30102999566398120)
+
+// HLSL pow(vecN, scalar) broadcasts the exponent; GLSL wants matching genTypes.
+vec2 pow(vec2 x, float y) { return pow(x, vec2(y)); }
+vec3 pow(vec3 x, float y) { return pow(x, vec3(y)); }
+vec4 pow(vec4 x, float y) { return pow(x, vec4(y)); }
 
 __SHADER_PLACEHOLD__
 
@@ -496,6 +502,27 @@ inline std::string FixImplicitConversions(const std::string& src) {
     {
         std::regex re(R"(\bint\s+(\w+)\s*=\s*(step\s*\([^;]*\))\s*;)");
         result = std::regex_replace(result, re, "float $1 = $2;");
+    }
+
+    // Fix: HLSL initialises vectors from a scalar literal ("vec2 a = 0.0, b = 0.0;");
+    // GLSL needs the constructor. Only literal initialisers directly after '='
+    // are touched, in every declarator of a vecN declaration.
+    {
+        std::regex  decl(R"(\b(vec[234])(\s+[A-Za-z_][^;(){}]*=[^;]*);)");
+        std::regex  init(R"((\b[A-Za-z_]\w*\s*=\s*)([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(\s*(?:,|$)))");
+        std::string out;
+        auto        last = result.cbegin();
+        for (auto it = std::sregex_iterator(result.begin(), result.end(), decl);
+             it != std::sregex_iterator();
+             ++it) {
+            const auto& m    = *it;
+            const auto  type = m[1].str();
+            out.append(last, m[0].first);
+            out += type + std::regex_replace(m[2].str(), init, "$1" + type + "($2)$3") + ";";
+            last = m[0].second;
+        }
+        out.append(last, result.cend());
+        result = std::move(out);
     }
 
     return result;
