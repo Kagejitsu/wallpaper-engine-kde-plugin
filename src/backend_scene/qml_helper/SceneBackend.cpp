@@ -359,13 +359,13 @@ QString SceneObject::videoUnderlayUrl(const QUrl& source) const {
     ProjectFiles  files(scene_path);
     const QJsonObject scene = files.json(QFileInfo(scene_path).fileName());
 
-    // Mirror WPSceneParser: only image/particle/sound/light objects become
-    // layers, in file order. The underlay must be the very first of them.
+    // Mirror WPSceneParser: the underlay must be the bottom *drawable* layer
+    // (image or particle, in file order); sounds and lights are not drawn.
     QJsonObject bottom;
     for (const auto& v : scene.value("objects").toArray()) {
         auto obj = v.toObject();
         bool is_layer = false;
-        for (auto key : { "image", "particle", "sound", "light" })
+        for (auto key : { "image", "particle" })
             if (obj.contains(key) && ! obj.value(key).isNull()) is_layer = true;
         if (! is_layer) continue;
         bottom = obj;
@@ -379,19 +379,23 @@ QString SceneObject::videoUnderlayUrl(const QUrl& source) const {
                          .toArray().at(0).toString();
     if (tex.isEmpty()) return {};
 
-    // .tex header, then the single mip: ... i32 size, then the MP4 bytes
-    // (which open with a 4-byte box length and "ftyp").
+    // .tex header, then the single mip: ... i32 size, then the video bytes:
+    // an MP4 opens with a 4-byte box length and "ftyp", a WebM with the EBML
+    // magic 1A 45 DF A3. The i32 right before the data is its byte size.
     const QString tex_name = "materials/" + tex + ".tex";
     QString       file;
     qint64        off, size;
     if (! files.locate(tex_name, file, off, size)) return {};
     const QByteArray head = files.read(tex_name, 256);
-    const auto       p    = head.indexOf("ftyp");
-    if (! head.startsWith("TEXV") || p < 8) return {};
+    if (! head.startsWith("TEXV")) return {};
+    qint64 data = -1;
+    if (auto p = head.indexOf("ftyp"); p >= 8) data = p - 4;
+    else if (auto e = head.indexOf(QByteArray("\x1A\x45\xDF\xA3", 4)); e >= 4) data = e;
+    if (data < 4) return {};
     qint32 mp4_size;
-    std::memcpy(&mp4_size, head.constData() + p - 8, 4);
-    const qint64 start = off + p - 4;
-    if (mp4_size <= 0 || (p - 4) + (qint64)mp4_size > size) return {};
+    std::memcpy(&mp4_size, head.constData() + data - 4, 4);
+    const qint64 start = off + data;
+    if (mp4_size <= 0 || data + (qint64)mp4_size > size) return {};
 
     const QString url =
         QString("slice://%1-%2@%3").arg(start).arg(start + mp4_size).arg(file);

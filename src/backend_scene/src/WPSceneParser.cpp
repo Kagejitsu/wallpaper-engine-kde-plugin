@@ -611,7 +611,9 @@ bool IsVideoTextureLayer(fs::VFS& vfs, const wpscene::WPImageObject& img) {
     std::array<char, 256> head {};
     auto                  n = f->Read(head.data(), head.size());
     if (n < 16 || std::string_view(head.data(), 4) != "TEXV") return false;
-    return std::string_view(head.data(), (usize)n).find("ftyp") != std::string_view::npos;
+    const std::string_view sv(head.data(), (usize)n);
+    return sv.find("ftyp") != std::string_view::npos ||           // MP4
+           sv.find("\x1A\x45\xDF\xA3") != std::string_view::npos; // WebM/Matroska (EBML)
 }
 
 void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
@@ -1271,16 +1273,21 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
     // Video underlay: the bottom layer is an embedded MP4 the renderer can't
     // decode. Drop it and render the rest over a transparent background; the
     // QML side plays the video beneath with mpv.
+    // The bottom *drawable* layer: sounds and lights are not drawn, skip them.
     bool video_underlay = false;
-    if (! wp_objs.empty()) {
-        auto* img = std::get_if<wpscene::WPImageObject>(&wp_objs.front());
+    for (auto it = wp_objs.begin(); it != wp_objs.end(); ++it) {
+        if (std::holds_alternative<wpscene::WPSoundObject>(*it) ||
+            std::holds_alternative<wpscene::WPLightObject>(*it))
+            continue;
+        auto* img = std::get_if<wpscene::WPImageObject>(&*it);
         if (img != nullptr && IsVideoTextureLayer(vfs, *img)) {
             LOG_INFO("video underlay: bottom layer '%s' is a video texture, skipping it",
                      img->name.c_str());
-            wp_objs.erase(wp_objs.begin());
+            wp_objs.erase(it);
             sc.general.clearcolor = { 0.0f, 0.0f, 0.0f };
             video_underlay        = true;
         }
+        break;
     }
 
     InitContext(context, vfs, sc);
