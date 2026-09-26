@@ -542,6 +542,63 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
     }
 }
 
+// Layer parenting: a layer with "parent" has origin/angles/scale relative to that
+// layer, and is hidden when it is. Resolve each chain into absolute values so the
+// rest of the parser can keep treating layers as independent.
+void ResolveParenting(std::vector<WPObjectVar>& objs) {
+    struct Xform {
+        std::array<float, 3> origin, scale, angles;
+        bool                 visible;
+        i32                  parent;
+    };
+    std::unordered_map<i32, Xform> local;
+    auto collect = [&local](auto& o) {
+        local[o.id] = { o.origin, o.scale, o.angles, o.visible, o.parent };
+    };
+    for (auto& obj : objs) {
+        std::visit(visitor::overload { [&](wpscene::WPImageObject& o) { collect(o); },
+                                       [&](wpscene::WPParticleObject& o) { collect(o); },
+                                       [](auto&) {} },
+                   obj);
+    }
+
+    std::unordered_map<i32, Xform> world;
+    std::function<Xform(i32, int)> resolve = [&](i32 id, int depth) -> Xform {
+        if (auto it = world.find(id); it != world.end()) return it->second;
+        Xform x = local.at(id);
+        if (x.parent >= 0 && local.count(x.parent) && depth < 64) {
+            const Xform p = resolve(x.parent, depth + 1);
+            // child origin is in the parent's (scaled, rotated) space
+            const float c = std::cos(p.angles[2]), s = std::sin(p.angles[2]);
+            const float lx = x.origin[0] * p.scale[0], ly = x.origin[1] * p.scale[1];
+            x.origin = { p.origin[0] + lx * c - ly * s,
+                         p.origin[1] + lx * s + ly * c,
+                         p.origin[2] + x.origin[2] * p.scale[2] };
+            for (int i = 0; i < 3; i++) {
+                x.scale[i] *= p.scale[i];
+                x.angles[i] += p.angles[i];
+            }
+            x.visible = x.visible && p.visible;
+        }
+        return world[id] = x;
+    };
+
+    auto apply = [&](auto& o) {
+        if (o.parent < 0 || ! local.count(o.parent)) return;
+        const Xform w = resolve(o.id, 0);
+        o.origin      = w.origin;
+        o.scale       = w.scale;
+        o.angles      = w.angles;
+        o.visible     = w.visible;
+    };
+    for (auto& obj : objs) {
+        std::visit(visitor::overload { [&](wpscene::WPImageObject& o) { apply(o); },
+                                       [&](wpscene::WPParticleObject& o) { apply(o); },
+                                       [](auto&) {} },
+                   obj);
+    }
+}
+
 // A "video texture" is a .tex whose single mip holds an MP4 file verbatim
 // (look for the ISO-BMFF "ftyp" box right after the header). The renderer
 // can't decode it; the host plays it underneath instead (see VideoUnderlay).
@@ -1209,6 +1266,8 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         sc.general.orthogonalprojection.width  = w;
         sc.general.orthogonalprojection.height = h;
     }
+
+    ResolveParenting(wp_objs);
 
     // Video underlay: the bottom layer is an embedded MP4 the renderer can't
     // decode. Drop it and render the rest over a transparent background; the

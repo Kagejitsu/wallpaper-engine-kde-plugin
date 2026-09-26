@@ -61,6 +61,7 @@ public:
     };
     bool                       FromJson(const nlohmann::json&, fs::VFS&);
     int32_t                    id { 0 };
+    int32_t                    parent { -1 }; // id of the parent layer, -1 = none
     std::string                name;
     std::array<float, 3>       origin { 0.0f, 0.0f, 0.0f };
     std::array<float, 3>       scale { 1.0f, 1.0f, 1.0f };
