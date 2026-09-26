@@ -688,9 +688,12 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     {
         if (! hasEffect) {
             svData.parallaxDepth = { wpimgobj.parallaxDepth[0], wpimgobj.parallaxDepth[1] };
-            if (puppet) {
-                WPMdlParser::AddPuppetShaderInfo(shaderInfo, *puppet);
-            }
+        }
+        // The puppet is always skinned by the layer's own draw: with effects it
+        // goes into the effect buffer first, so the effects act on the posed
+        // character (as Wallpaper Engine does) instead of on the raw parts atlas.
+        if (puppet) {
+            WPMdlParser::AddPuppetShaderInfo(shaderInfo, *puppet);
         }
 
         baseConstSvs["g_Color4"] = std::array<float, 4> {
@@ -751,22 +754,12 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
         }
 
         if (puppet) {
+            svData.puppet_layer = WPPuppetLayer(puppet->puppet);
+            svData.puppet_layer.prepared(wpimgobj.puppet_layers);
+            WPMdlParser::GenPuppetMesh(mesh, *puppet);
             if (hasEffect) {
-                GenCardMesh(
-                    mesh, { (uint16_t)wpimgobj.size[0], (uint16_t)wpimgobj.size[1] }, mapRate);
-                WPMdlParser::GenPuppetMesh(effct_final_mesh, *puppet);
-
-                wpscene::WPImageEffect puppet_effect;
-                wpscene::WPMaterial    puppet_mat;
-                puppet_mat             = wpimgobj.material;
-                puppet_mat.textures[0] = "";
-                WPMdlParser::AddPuppetMatInfo(puppet_mat, *puppet);
-                puppet_effect.materials.push_back(puppet_mat);
-                wpimgobj.effects.push_back(puppet_effect);
-            } else {
-                svData.puppet_layer = WPPuppetLayer(puppet->puppet);
-                svData.puppet_layer.prepared(wpimgobj.puppet_layers);
-                WPMdlParser::GenPuppetMesh(mesh, *puppet);
+                GenCardMesh(effct_final_mesh,
+                            { (uint16_t)wpimgobj.size[0], (uint16_t)wpimgobj.size[1] });
             }
         }
         if (! puppet) {
@@ -779,7 +772,13 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     auto imgBlendMode = material.blenmode;
     // disable img material blend, as it's the first effect node now
     if (hasEffect) {
-        material.blenmode = BlendMode::Normal;
+        if (puppet) {
+            // a skinned mesh does not cover the buffer and its parts overlap:
+            // clear to transparent and keep blending
+            material.clearTarget = true;
+        } else {
+            material.blenmode = BlendMode::Normal;
+        }
     }
     mesh.AddMaterial(std::move(material));
     spImgNode->AddMesh(spMesh);

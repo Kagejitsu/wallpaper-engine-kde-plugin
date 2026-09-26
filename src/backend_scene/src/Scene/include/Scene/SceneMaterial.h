@@ -32,5 +32,8 @@ public:
 
     SceneMaterialCustomShader customShader;
     BlendMode                 blenmode { BlendMode::Disable };
+    // First draw of an effect chain that does not cover its whole target (a
+    // skinned puppet): clear the target to transparent and blend "over" it.
+    bool clearTarget { false };
 };
 } // namespace wallpaper

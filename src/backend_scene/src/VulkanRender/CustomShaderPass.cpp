@@ -300,6 +300,12 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             m_desc.blending = color_blend.blendEnable;
 
             SetAttachmentLoadOp(blendmode, loadOp);
+            if (mesh.Material()->clearTarget) {
+                loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                // straight-alpha "over" onto a transparent target
+                color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                color_blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            }
         }
         auto opt = CreateRenderPass(device.handle(),
                                     VK_FORMAT_R8G8B8A8_UNORM,
@@ -431,6 +437,8 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
         m_desc.clear_value = VkClearValue {
             .color = { sc[0], sc[1], sc[2], scene.clearAlpha },
         };
+        if (m_desc.node->Mesh()->Material()->clearTarget)
+            m_desc.clear_value = VkClearValue { .color = { 0.0f, 0.0f, 0.0f, 0.0f } };
     }
     for (auto& tex : releaseTexs()) {
         rr.rt_pool->MarkShareReady(tex);
