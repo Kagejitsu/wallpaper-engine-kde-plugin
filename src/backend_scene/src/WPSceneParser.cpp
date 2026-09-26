@@ -542,6 +542,21 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
     }
 }
 
+// A "video texture" is a .tex whose single mip holds an MP4 file verbatim
+// (look for the ISO-BMFF "ftyp" box right after the header). The renderer
+// can't decode it; the host plays it underneath instead (see VideoUnderlay).
+bool IsVideoTextureLayer(fs::VFS& vfs, const wpscene::WPImageObject& img) {
+    if (! img.visible || img.material.textures.empty()) return false;
+    const auto& tex = img.material.textures.front();
+    if (tex.empty()) return false;
+    auto f = vfs.Open("/assets/materials/" + tex + ".tex");
+    if (! f) return false;
+    std::array<char, 256> head {};
+    auto                  n = f->Read(head.data(), head.size());
+    if (n < 16 || std::string_view(head.data(), 4) != "TEXV") return false;
+    return std::string_view(head.data(), (usize)n).find("ftyp") != std::string_view::npos;
+}
+
 void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     auto& wpimgobj = img_obj;
     auto& vfs      = *context.vfs;
@@ -1195,7 +1210,23 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         sc.general.orthogonalprojection.height = h;
     }
 
+    // Video underlay: the bottom layer is an embedded MP4 the renderer can't
+    // decode. Drop it and render the rest over a transparent background; the
+    // QML side plays the video beneath with mpv.
+    bool video_underlay = false;
+    if (! wp_objs.empty()) {
+        auto* img = std::get_if<wpscene::WPImageObject>(&wp_objs.front());
+        if (img != nullptr && IsVideoTextureLayer(vfs, *img)) {
+            LOG_INFO("video underlay: bottom layer '%s' is a video texture, skipping it",
+                     img->name.c_str());
+            wp_objs.erase(wp_objs.begin());
+            sc.general.clearcolor = { 0.0f, 0.0f, 0.0f };
+            video_underlay        = true;
+        }
+    }
+
     InitContext(context, vfs, sc);
+    if (video_underlay) context.scene->clearAlpha = 0.0f;
     ParseCamera(context, sc.general);
 
     {
