@@ -605,9 +605,19 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     (void)hasPuppet;
 
     bool isCompose = (wpimgobj.image == "models/util/composelayer.json");
-    // skip no effect compose layer
-    // it's not the correct behaviour, but do it for now
-    if (! hasEffect && isCompose) {
+    // A compose layer's own material copies the frame behind it. Without effects
+    // that is a no-op; with copybackground=false it is a container that starts
+    // transparent (its children draw on their own here), so drawing the copy
+    // would paste the background over the scene. Keep only its transform, which
+    // children and scripts still parent to.
+    if (isCompose && (! hasEffect || ! wpimgobj.copybackground)) {
+        auto node = std::make_shared<SceneNode>(Vector3f(wpimgobj.origin.data()),
+                                                Vector3f(wpimgobj.scale.data()),
+                                                Vector3f(wpimgobj.angles.data()));
+        node->ID() = wpimgobj.id;
+        node->SetVisible(wpimgobj.visible);
+        context.layer_nodes[wpimgobj.id] = node.get();
+        context.scene->auxNodes.push_back(std::move(node));
         return;
     }
 

@@ -70,6 +70,8 @@ public:
     std::array<float, 2>       parallaxDepth { 0.0f, 0.0f };
     std::array<float, 3>       color { 1.0f, 1.0f, 1.0f };
     int32_t                    colorBlendMode { 0 };
+    // compose layers: start from the frame behind them (true) or transparent
+    bool                       copybackground { true };
     float                      alpha { 1.0f };
     float                      brightness { 1.0f };
     bool                       fullscreen { false };
