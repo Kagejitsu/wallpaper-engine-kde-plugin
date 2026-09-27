@@ -70,6 +70,10 @@ private:
                           size_t* pBytesRead) {
         auto* pDecoder = static_cast<Decoder<TStream>*>(pMaDecoder->pUserData);
         *pBytesRead    = pDecoder->m_stream.Read(pBufferOut, bytesToRead);
+        // miniaudio must see the end of the stream: the stb_vorbis backend's
+        // push-mode probe otherwise keeps asking for more data forever (and grows
+        // its buffer towards 2 GB) whenever it is handed a non-Vorbis file.
+        if (*pBytesRead == 0 && bytesToRead > 0) return MA_AT_END;
         return MA_SUCCESS;
     }
     static ma_result Seek(ma_decoder* pMaDecoder, ma_int64 byteOffset, ma_seek_origin origin) {
