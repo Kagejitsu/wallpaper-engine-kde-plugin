@@ -289,6 +289,54 @@ inline std::string Preprocessor(const std::string& in_src, ShaderType type, cons
     std::string res;
 
     std::string src = wallpaper::WPShaderParser::PreShaderHeader(in_src, combos, type);
+    // Workshop shaders are Windows-authored (CRLF). glslang's preprocessor drops
+    // whatever follows a CRLF-terminated directive at the end of the file
+    // ("#endif\r\n}" loses the brace -> "unexpected end of file"), so normalise
+    // line endings first and make sure the source ends with a newline.
+    {
+        std::string lf;
+        lf.reserve(src.size());
+        for (usize i = 0; i < src.size(); i++) {
+            if (src[i] == '\r') {
+                if (i + 1 < src.size() && src[i + 1] == '\n') continue;
+                lf += '\n';
+            } else {
+                lf += src[i];
+            }
+        }
+        src.swap(lf);
+        if (! src.empty() && src.back() != '\n') src += '\n';
+    }
+    // Workshop shaders (and WE's own headers) sometimes carry a stray #endif or
+    // #else at nesting depth zero. WE's preprocessor ignores it; glslang's
+    // silently drops everything after it (losing main()'s closing brace ->
+    // "unexpected end of file"). Blank such lines.
+    {
+        std::regex  re_open(R"(^\s*#\s*if(def|ndef)?\b)");
+        std::regex  re_close(R"(^\s*#\s*endif\b)");
+        std::regex  re_else(R"(^\s*#\s*(else|elif)\b)");
+        std::string out;
+        out.reserve(src.size());
+        int         depth = 0;
+        usize       pos   = 0;
+        while (pos < src.size()) {
+            usize       end  = src.find('\n', pos);
+            if (end == std::string::npos) end = src.size();
+            std::string line = src.substr(pos, end - pos);
+            if (std::regex_search(line, re_open)) {
+                depth++;
+            } else if (std::regex_search(line, re_close)) {
+                if (depth == 0) line = "// stray #endif removed";
+                else depth--;
+            } else if (std::regex_search(line, re_else)) {
+                if (depth == 0) line = "// stray #else removed";
+            }
+            out += line;
+            out += '\n';
+            pos = end + 1;
+        }
+        src.swap(out);
+    }
 
     // workaround #require directive
     {
@@ -482,6 +530,22 @@ inline std::string FixImplicitConversions(const std::string& src) {
         fixTrunc(vec2_vars, vec3_vars, "xy");
         fixTrunc(vec2_vars, vec4_vars, "xy");
         fixTrunc(vec3_vars, vec4_vars, "xyz");
+
+        // Same truncation when a wider variable *leads* the initialiser of a
+        // narrower declaration: "vec2 d = v4 * s;" -> "vec2 d = v4.xy * s;".
+        // Anchored on the declared type so a name reused with another type in a
+        // different scope cannot be rewritten by mistake.
+        auto fixTruncDecl = [&result](const char* dst_type, const std::set<std::string>& src,
+                                      const char* swizzle) {
+            for (const auto& s : src) {
+                std::regex re(std::string("\\b(") + dst_type + R"()\s+(\w+)\s*=\s*()" + s +
+                              R"()\b(\s*[*+/-]))");
+                result = std::regex_replace(result, re, "$1 $2 = $3." + std::string(swizzle) + "$4");
+            }
+        };
+        fixTruncDecl("vec2", vec3_vars, "xy");
+        fixTruncDecl("vec2", vec4_vars, "xy");
+        fixTruncDecl("vec3", vec4_vars, "xyz");
     }
 
     // Fix: HLSL pow(scalar, vecN) broadcasts the scalar; GLSL requires matching genType.
