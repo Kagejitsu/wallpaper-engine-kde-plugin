@@ -109,6 +109,13 @@ public:
         return *propValue;
     }
 
+    // All properties as one object (for SceneScript's engine.userProperties)
+    nlohmann::json ToJson() const {
+        nlohmann::json j = nlohmann::json::object();
+        for (const auto& [k, v] : m_properties) j[k] = v;
+        return j;
+    }
+
     // Check if empty
     bool Empty() const { return m_properties.empty(); }
 

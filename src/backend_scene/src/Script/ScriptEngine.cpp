@@ -50,7 +50,18 @@ bool KindOf(std::string_view property, PropKind& kind) {
 }
 
 // layer accessor ids (magic)
-enum LayerProp : int { LP_ORIGIN, LP_ANGLES, LP_SCALE, LP_ALPHA, LP_VISIBLE, LP_SIZE, LP_NAME, LP_ID };
+enum LayerProp : int {
+    LP_ORIGIN,
+    LP_ANGLES,
+    LP_SCALE,
+    LP_ALPHA,
+    LP_VISIBLE,
+    LP_SIZE,
+    LP_NAME,
+    LP_ID,
+    LP_PARENT,
+    LP_TRANSFORM
+};
 
 struct Vec3d {
     double x { 0 }, y { 0 }, z { 0 };
@@ -99,8 +110,18 @@ JSValue NewVec2(JSContext* ctx, double x, double y) {
 
 // ---- native functions exposed to the prelude -----------------------------
 
+// console.* output; scripts that log every frame would flood the journal,
+// so each scene gets a fixed number of lines.
+constexpr int kMaxConsoleLines = 200;
+
 JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    static thread_local int lines = 0;
     if (argc < 2) return JS_UNDEFINED;
+    if (lines >= kMaxConsoleLines) return JS_UNDEFINED;
+    if (++lines == kMaxConsoleLines) {
+        LOG_INFO("script: console output limit reached, further messages dropped");
+        return JS_UNDEFINED;
+    }
     int32_t level = 0;
     JS_ToInt32(ctx, &level, argv[0]);
     const char* s = JS_ToCString(ctx, argv[1]);
@@ -112,6 +133,18 @@ JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
         JS_FreeCString(ctx, s);
     }
     return JS_UNDEFINED;
+}
+
+JSValue js_layer_count(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    auto* eng = EngineOf(ctx);
+    return JS_NewInt32(ctx, eng ? eng->LayerCount() : 0);
+}
+
+JSValue js_layer_at(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    auto* eng = EngineOf(ctx);
+    int32_t i = -1;
+    if (eng == nullptr || argc < 1 || JS_ToInt32(ctx, &i, argv[0]) < 0) return JS_NULL;
+    return eng->LayerObject(i);
 }
 
 JSValue js_get_layer(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
@@ -159,14 +192,24 @@ JSValue layer_get(JSContext* ctx, JSValueConst this_val, int magic) {
     case LP_SIZE: return NewVec2(ctx, layer->size[0], layer->size[1]);
     case LP_NAME: return JS_NewString(ctx, layer->name.c_str());
     case LP_ID: return JS_NewInt32(ctx, layer->id);
+    case LP_PARENT: return EngineOf(ctx)->LayerObject(layer->parent);
+    case LP_TRANSFORM: {
+        // world transform, column-major like WE's {m: [16]} (m[12], m[13] = x, y)
+        Eigen::Matrix4d m = node ? node->ModelTrans() : Eigen::Matrix4d::Identity();
+        JSValue         arr = JS_NewArray(ctx);
+        for (int i = 0; i < 16; i++)
+            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewFloat64(ctx, m(i % 4, i / 4)));
+        return arr;
+    }
     }
     return JS_UNDEFINED;
 }
 
 JSValue layer_set(JSContext* ctx, JSValueConst this_val, JSValueConst val, int magic) {
     auto* layer = LayerOf(ctx, this_val);
-    if (layer == nullptr || layer->node == nullptr) return JS_UNDEFINED;
+    if (layer == nullptr) return JS_UNDEFINED;
     auto* node = layer->node;
+    if (node == nullptr && magic != LP_SIZE) return JS_UNDEFINED;
     Vec3d v;
     switch (magic) {
     case LP_ORIGIN:
@@ -191,7 +234,17 @@ JSValue layer_set(JSContext* ctx, JSValueConst this_val, JSValueConst val, int m
         if (b >= 0) node->SetVisible(b != 0);
         break;
     }
-    default: break;
+    case LP_SIZE: {
+        // scripts may resize text/sprite layers; keep the value for readers
+        JSValue x = JS_GetPropertyStr(ctx, val, "x"), y = JS_GetPropertyStr(ctx, val, "y");
+        double  dx = 0, dy = 0;
+        if (JS_ToFloat64(ctx, &dx, x) == 0 && JS_ToFloat64(ctx, &dy, y) == 0)
+            layer->size = { (float)dx, (float)dy };
+        JS_FreeValue(ctx, x);
+        JS_FreeValue(ctx, y);
+        break;
+    }
+    default: break; // name / id / parent / transform are read-only, assignments are ignored
     }
     return JS_UNDEFINED;
 }
@@ -202,9 +255,11 @@ const JSCFunctionListEntry kLayerProtoFuncs[] = {
     JS_CGETSET_MAGIC_DEF("scale", layer_get, layer_set, LP_SCALE),
     JS_CGETSET_MAGIC_DEF("alpha", layer_get, layer_set, LP_ALPHA),
     JS_CGETSET_MAGIC_DEF("visible", layer_get, layer_set, LP_VISIBLE),
-    JS_CGETSET_MAGIC_DEF("size", layer_get, nullptr, LP_SIZE),
-    JS_CGETSET_MAGIC_DEF("name", layer_get, nullptr, LP_NAME),
-    JS_CGETSET_MAGIC_DEF("id", layer_get, nullptr, LP_ID),
+    JS_CGETSET_MAGIC_DEF("size", layer_get, layer_set, LP_SIZE),
+    JS_CGETSET_MAGIC_DEF("name", layer_get, layer_set, LP_NAME),
+    JS_CGETSET_MAGIC_DEF("id", layer_get, layer_set, LP_ID),
+    JS_CGETSET_MAGIC_DEF("parent", layer_get, layer_set, LP_PARENT),
+    JS_CGETSET_MAGIC_DEF("__transform", layer_get, layer_set, LP_TRANSFORM),
 };
 
 JSClassDef kLayerClass = {
@@ -324,6 +379,10 @@ bool ScriptEngine::initRuntime() {
     JS_SetPropertyStr(I.ctx, global, "__weLog", JS_NewCFunction(I.ctx, js_log, "__weLog", 2));
     JS_SetPropertyStr(
         I.ctx, global, "__weGetLayer", JS_NewCFunction(I.ctx, js_get_layer, "__weGetLayer", 1));
+    JS_SetPropertyStr(
+        I.ctx, global, "__weLayerCount", JS_NewCFunction(I.ctx, js_layer_count, "__weLayerCount", 0));
+    JS_SetPropertyStr(
+        I.ctx, global, "__weLayerAt", JS_NewCFunction(I.ctx, js_layer_at, "__weLayerAt", 1));
 
     beginBudget(kSetupBudgetSec);
     JSValue r = JS_Eval(
@@ -392,6 +451,11 @@ int ScriptEngine::AddLayer(const Layer& layer) {
     m_layers.push_back(layer);
     m_impl->layer_objs.push_back(JS_UNDEFINED);
     return (int)m_layers.size() - 1;
+}
+
+void ScriptEngine::SetLayerParent(int layer_index, int parent_index) {
+    auto* l = LayerAt(layer_index);
+    if (l != nullptr && LayerAt(parent_index) != nullptr) l->parent = parent_index;
 }
 
 int ScriptEngine::FindLayer(std::string_view name) const {
@@ -508,7 +572,35 @@ bool ScriptEngine::evalModule(Binding& b) {
     JSValue init = JS_GetPropertyStr(I.ctx, b.ns, "init");
     if (JS_IsFunction(I.ctx, init)) runBinding(b, init, "init");
     JS_FreeValue(I.ctx, init);
+
+    // WE hands every user property to applyUserProperties() right after init
+    if (b.ok) {
+        JSValue g  = JS_GetGlobalObject(I.ctx);
+        JSValue en = JS_GetPropertyStr(I.ctx, g, "engine");
+        callExport(b, "applyUserProperties", JS_GetPropertyStr(I.ctx, en, "userProperties"), "applyUserProperties");
+        JS_FreeValue(I.ctx, en);
+        JS_FreeValue(I.ctx, g);
+    }
     return b.ok;
+}
+
+// fn(arg) with thisLayer bound, if the module exports `name`; consumes arg
+void ScriptEngine::callExport(Binding& b, const char* name, JSValue arg, std::string_view what) {
+    auto&   I  = *m_impl;
+    JSValue fn = JS_GetPropertyStr(I.ctx, b.ns, name);
+    if (JS_IsFunction(I.ctx, fn)) {
+        JSValue layer   = LayerObject(b.layer);
+        JSValue argv[3] = { layer, fn, arg };
+        JSValue r       = JS_Call(I.ctx, I.event_fn, JS_UNDEFINED, 3, argv);
+        if (JS_IsException(r)) {
+            logException(std::string(what) + " on " + LayerAt(b.layer)->name);
+            disable(b, "runtime error");
+        }
+        JS_FreeValue(I.ctx, r);
+        JS_FreeValue(I.ctx, layer);
+    }
+    JS_FreeValue(I.ctx, fn);
+    JS_FreeValue(I.ctx, arg);
 }
 
 // Current property value as a JS value
@@ -627,24 +719,11 @@ void ScriptEngine::FireEvent(std::string_view name, const ScriptInput& input) {
 
     for (auto& b : m_bindings) {
         if (! b->ok) continue;
-        JSValue fn = JS_GetPropertyStr(I.ctx, b->ns, fname.c_str());
-        if (JS_IsFunction(I.ctx, fn)) {
-            JSValue ev = JS_NewObject(I.ctx);
-            JS_SetPropertyStr(I.ctx, ev, "position", NewVec2(I.ctx, cx, cy));
-            JS_SetPropertyStr(I.ctx, ev, "worldPosition", NewVec3(I.ctx, cx, m_canvas[1] - cy, 0));
-            JS_SetPropertyStr(I.ctx, ev, "button", JS_NewInt32(I.ctx, 0));
-            JSValue layer   = LayerObject(b->layer);
-            JSValue argv[3] = { layer, fn, ev };
-            JSValue r       = JS_Call(I.ctx, I.event_fn, JS_UNDEFINED, 3, argv);
-            if (JS_IsException(r)) {
-                logException(fname + " on " + LayerAt(b->layer)->name);
-                disable(*b, "runtime error");
-            }
-            JS_FreeValue(I.ctx, r);
-            JS_FreeValue(I.ctx, ev);
-            JS_FreeValue(I.ctx, layer);
-        }
-        JS_FreeValue(I.ctx, fn);
+        JSValue ev = JS_NewObject(I.ctx);
+        JS_SetPropertyStr(I.ctx, ev, "position", NewVec2(I.ctx, cx, cy));
+        JS_SetPropertyStr(I.ctx, ev, "worldPosition", NewVec3(I.ctx, cx, m_canvas[1] - cy, 0));
+        JS_SetPropertyStr(I.ctx, ev, "button", JS_NewInt32(I.ctx, 0));
+        callExport(*b, fname.c_str(), ev, fname);
     }
     I.drainJobs();
 }

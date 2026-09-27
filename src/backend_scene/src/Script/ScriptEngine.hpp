@@ -41,6 +41,7 @@ public:
         std::string          name;
         int                  id { 0 };
         std::array<float, 2> size { 0.0f, 0.0f };
+        int                  parent { -1 }; // layer index of the parent, -1 = none
     };
 
     ScriptEngine(std::array<int, 2> canvas, nlohmann::json user_properties);
@@ -50,6 +51,7 @@ public:
 
     // Register every layer before adding bindings: init() may look layers up.
     int  AddLayer(const Layer& layer);
+    void SetLayerParent(int layer_index, int parent_index);
     bool AddBinding(int layer_index, const ScriptBinding& binding);
 
     // Once per frame on the render thread, before uniforms are built.
@@ -65,6 +67,7 @@ public:
         return index >= 0 && (size_t)index < m_layers.size() ? &m_layers[(size_t)index] : nullptr;
     }
     int FindLayer(std::string_view name) const;
+    int LayerCount() const { return (int)m_layers.size(); }
     // a new reference to the layer's JS object (caller frees)
     JSValue LayerObject(int index);
 
@@ -77,6 +80,7 @@ private:
     JSValue currentValue(Binding& b);
     void    applyValue(Binding& b, JSValueConst value);
     void    runBinding(Binding& b, JSValueConst fn, std::string_view what);
+    void    callExport(Binding& b, const char* name, JSValue arg, std::string_view what);
     void   disable(Binding& b, std::string_view why);
     void   logException(std::string_view where);
     double timeOfDay() const;

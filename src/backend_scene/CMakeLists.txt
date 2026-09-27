@@ -13,6 +13,10 @@ include_directories(SYSTEM third_party)
 link_libraries(Eigen3::Eigen)
 
 add_subdirectory(third_party)
+# SceneScript engine (vendored quickjs-ng); only the static library is built
+set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/quickjs EXCLUDE_FROM_ALL)
 add_subdirectory(src)
 
 option(BUILD_TESTS "Build backend_scene unit tests" OFF)

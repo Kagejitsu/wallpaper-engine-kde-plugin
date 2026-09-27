@@ -44,6 +44,7 @@ add_library(
   WPParticleParser.cpp
   WPShaderParser.cpp
   WPSceneParser.cpp
+  Script/ScriptEngine.cpp
   WPShaderValueUpdater.cpp
   WPTexImageParser.cpp
   WPSoundParser.cpp
@@ -65,7 +66,7 @@ set(InteralLib
 target_link_libraries(
   ${PROJECT_NAME}
   PUBLIC wpUtils
-  PRIVATE ${InteralLib} nlohmann_json ${LZ4_LIBRARIES}
+  PRIVATE ${InteralLib} nlohmann_json ${LZ4_LIBRARIES} qjs
           ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC . Swapchain)

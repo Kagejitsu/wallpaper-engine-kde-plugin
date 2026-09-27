@@ -11,6 +11,7 @@
 #include "Particle/ParticleSystem.h"
 #include "Interface/IShaderValueUpdater.h"
 #include "WPShaderValueUpdater.hpp"
+#include "Script/ScriptEngine.hpp"
 
 #include "Fs/VFS.h"
 #include "Fs/PhysicalFs.h"
@@ -154,6 +155,7 @@ public:
         CMD_SET_SCENE,
         CMD_SET_FILLMODE,
         CMD_SET_SPEED,
+        CMD_SCREENSHOT,
         CMD_STOP,
         CMD_DRAW,
         CMD_NO
@@ -177,6 +179,7 @@ public:
                 CASE_CMD(SET_FILLMODE);
                 CASE_CMD(SET_SCENE);
                 CASE_CMD(SET_SPEED);
+                CASE_CMD(SCREENSHOT);
                 CASE_CMD(INIT_VULKAN);
             default: break;
             }
@@ -279,6 +282,12 @@ private:
                 auto mousePos = wpUpdater->GetMousePosition();
                 m_scene->paritileSys->UpdateMouseControlPoints(
                     mousePos, { m_scene->ortho[0], m_scene->ortho[1] });
+
+                // SceneScript: drive scripted layer properties for this frame
+                if (m_scene->scriptEngine) {
+                    m_scene->scriptEngine->Tick(
+                        m_scene->frameTime, m_scene->elapsingTime, ScriptInput { pos });
+                }
             }
             m_scene->paritileSys->Emitt();
 
@@ -334,6 +343,10 @@ private:
             onMirrorKeyChanged();
         }
     }
+    MHANDLER_CMD(SCREENSHOT) {
+        std::string path;
+        if (msg->findString("value", &path) && ! path.empty()) m_render->requestScreenshot(path);
+    }
     MHANDLER_CMD(INIT_VULKAN) {
         std::shared_ptr<RenderInitInfo> info;
         if (msg->findObject("info", &info)) {
@@ -382,7 +395,16 @@ void MainHandler::stopRender() {
     if (m_render_handler) m_render_handler->releaseMirrorGroup();
 }
 
-MainHandler::~MainHandler() { stopRender(); }
+MainHandler::~MainHandler() {
+    stopRender();
+    // Silence the audio device before the scene (and its VFS, which the sound
+    // streams read from) goes away: the data callback would otherwise switch
+    // tracks on a dead VFS and spin inside the decoder forever.
+    if (m_sound_manager) {
+        m_sound_manager->UnMountAll();
+        m_sound_manager->Pause();
+    }
+}
 } // namespace wallpaper
 
 SceneWallpaper::SceneWallpaper(): m_main_handler(std::make_shared<MainHandler>()) {}
@@ -511,6 +533,13 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
             if (msg->findFloat("value", &speed)) {
                 auto nmsg = CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_SET_SPEED);
                 nmsg->setFloat("value", speed);
+                nmsg->post();
+            }
+        } else if (property == PROPERTY_SCREENSHOT) {
+            std::string path;
+            if (msg->findString("value", &path)) {
+                auto nmsg = CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_SCREENSHOT);
+                nmsg->setString("value", path);
                 nmsg->post();
             }
         } else if (property == PROPERTY_USER_PROPS) {

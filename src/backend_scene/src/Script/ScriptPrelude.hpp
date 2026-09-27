@@ -39,6 +39,7 @@ class Vec2 {
     distance(o) { return Math.hypot(this.x - o.x, this.y - o.y); }
     normalize() { const l = this.length(); return l > 0 ? this.divide(l) : new Vec2(0, 0); }
     lerp(o, t) { return new Vec2(this.x + (o.x - this.x) * t, this.y + (o.y - this.y) * t); }
+    mix(o, t) { return this.lerp(o, t); }
     equals(o) { return !!o && this.x === o.x && this.y === o.y; }
     toString() { return this.x + ' ' + this.y; }
 }
@@ -73,6 +74,7 @@ class Vec3 {
         return new Vec3(this.x + (o.x - this.x) * t, this.y + (o.y - this.y) * t,
                         this.z + (o.z - this.z) * t);
     }
+    mix(o, t) { return this.lerp(o, t); }
     equals(o) { return !!o && this.x === o.x && this.y === o.y && this.z === o.z; }
     toString() { return this.x + ' ' + this.y + ' ' + this.z; }
 }
@@ -147,16 +149,57 @@ globalThis.createScriptProperties = function () {
 };
 
 // ---- engine / input ----------------------------------------------------
+// engine.setTimeout / setInterval: timers fire from __weTick on the runtime
+// clock, with thisLayer bound to the layer that armed them.
+const __timers = new Map();
+let __timerSeq = 1;
+function __armTimer(fn, ms, repeat) {
+    const id = __timerSeq++;
+    const delay = Math.max(0, Number(ms) || 0) / 1000;
+    __timers.set(id, { fn, delay, repeat, due: globalThis.engine.runtime + delay,
+                       layer: globalThis.thisLayer });
+    return id;
+}
+function __runTimers(now) {
+    for (const [id, t] of Array.from(__timers)) {
+        if (now < t.due) continue;
+        if (t.repeat) t.due = now + t.delay; else __timers.delete(id);
+        const saved = globalThis.thisLayer;
+        globalThis.thisLayer = t.layer;
+        try { t.fn(); } catch (e) { __weLog(2, 'timer: ' + (e && e.stack || e)); }
+        globalThis.thisLayer = saved;
+    }
+}
+
 globalThis.engine = {
     frametime: 0,
     runtime: 0,
     timeOfDay: 0,
     canvasSize: new Vec2(0, 0),
     screenSize: new Vec2(0, 0),
+    screenResolution: new Vec2(0, 0),
     userProperties: {},
     isMobile: false,
+    isLandscape() { return globalThis.engine.canvasSize.x >= globalThis.engine.canvasSize.y; },
+    isRunningInEditor() { return false; },
+    isScreensaver() { return false; },
+    AUDIO_RESOLUTION_16: 16,
+    AUDIO_RESOLUTION_32: 32,
+    AUDIO_RESOLUTION_64: 64,
     isWallpaperVisible() { return true; },
-    registerAudioBuffers() {},
+    setTimeout(fn, ms) { return __armTimer(fn, ms, false); },
+    setInterval(fn, ms) { return __armTimer(fn, ms, true); },
+    clearTimeout(id) { __timers.delete(id); },
+    clearInterval(id) { __timers.delete(id); },
+    openUserShortcut() {},
+    registerListener() {},
+    // Audio response is not captured yet: hand out silent buffers of the
+    // requested resolution so visualiser scripts run (flat) instead of failing.
+    registerAudioBuffers(resolution) {
+        const n = Math.max(1, Math.min(64, resolution | 0));
+        const z = () => new Array(n).fill(0);
+        return { resolution: n, average: z(), left: z(), right: z() };
+    },
     unregisterAudioBuffers() {},
     setDynamicPerformanceMode() {},
 };
@@ -170,6 +213,29 @@ globalThis.input = {
 };
 
 globalThis.shared = {};
+
+// Per-wallpaper key/value store. In-memory for now (not persisted).
+const __storage = new Map();
+globalThis.localStorage = {
+    LOCATION_SCREEN: 0,
+    LOCATION_WALLPAPER: 1,
+    LOCATION_ALL: 2,
+    get(key) { return __storage.has(String(key)) ? __storage.get(String(key)) : undefined; },
+    set(key, value) { __storage.set(String(key), value); },
+    remove(key) { __storage.delete(String(key)); },
+    clear() { __storage.clear(); },
+    // browser-style aliases
+    getItem(key) { return this.get(key); },
+    setItem(key, value) { this.set(key, value); },
+    removeItem(key) { this.remove(key); },
+};
+
+// media integration event constants (no media source is wired up yet)
+globalThis.MediaPlaybackEvent = { PLAYBACK_STOPPED: 0, PLAYBACK_PLAYING: 1, PLAYBACK_PAUSED: 2 };
+globalThis.MediaStatusEvent = { STATUS_STOPPED: 0, STATUS_PLAYING: 1, STATUS_PAUSED: 2 };
+globalThis.MediaPropertiesEvent = {};
+globalThis.MediaThumbnailEvent = {};
+globalThis.MediaTimelineEvent = {};
 
 globalThis.console = {
     log(...a) { __weLog(0, a.map(String).join(' ')); },
@@ -190,26 +256,83 @@ function __animStub(name) {
     };
 }
 
+// sprite-sheet animation handle (frames are not driven by the renderer yet)
+function __textureAnimStub() {
+    return {
+        rate: 1, frame: 0, frameCount: 1, paused: true,
+        setFrame(f) { this.frame = f | 0; }, getFrame() { return this.frame; },
+        play() {}, pause() {}, stop() {}, reset() {},
+        isPlaying() { return false; },
+    };
+}
+
 Object.assign(globalThis.__weLayerProto, {
     getAnimation(name) { return __animStub(String(name)); },
+    getTextureAnimation() {
+        if (!this.__texAnim) this.__texAnim = __textureAnimStub();
+        return this.__texAnim;
+    },
     getName() { return this.name; },
     isVisible() { return this.visible; },
-    // sound layers
-    play() {}, stop() {}, pause() {},
-    // parent-relative helpers some scripts expect
-    getParent() { return null; },
+    getParent() { return this.parent; },
+    getChildren() {
+        const out = [];
+        const n = __weLayerCount();
+        for (let i = 0; i < n; i++) {
+            const l = __weLayerAt(i);
+            if (l && l.parent === this) out.push(l);
+        }
+        return out;
+    },
+    getTransformMatrix() { return { m: this.__transform }; },
+    // sound layers (not driven by scripts yet)
+    play() {}, stop() {}, pause() {}, isPlaying() { return false; }, volume: 1,
+    // text layers
+    horizontalalign: 'center', verticalalign: 'center', text: '',
+    parallaxDepth: new Vec2(0, 0),
     toString() { return 'Layer(' + this.name + ')'; },
 });
+
+// Layers created at runtime (thisScene.createLayer) are not rendered yet: the
+// script gets a detached stand-in so the rest of its logic keeps working.
+let __createLayerWarned = false;
+function __detachedLayer(name) {
+    const l = Object.create(globalThis.__weLayerProto);
+    Object.assign(l, {
+        name, id: -1,
+        origin: new Vec3(0, 0, 0), angles: new Vec3(0, 0, 0), scale: new Vec3(1, 1, 1),
+        alpha: 1, visible: true, size: new Vec2(0, 0), parallaxDepth: new Vec2(0, 0),
+    });
+    return l;
+}
 
 globalThis.thisScene = {
     getLayer(name) { return __weGetLayer(String(name)); },
     getLayerByName(name) { return __weGetLayer(String(name)); },
     getUserProperty(name) { return globalThis.engine.userProperties[name]; },
-    enumerateLayers() { return []; },
+    enumerateLayers() {
+        const out = [];
+        const n = __weLayerCount();
+        for (let i = 0; i < n; i++) { const l = __weLayerAt(i); if (l) out.push(l); }
+        return out;
+    },
     enumerateLayersByTag() { return []; },
     getLayerDepth() { return 0; },
+    getLayerIndex(layer) { return layer && typeof layer.id === 'number' ? layer.id : 0; },
+    getCameraTransforms() { return { origin: new Vec3(0, 0, 0), angles: new Vec3(0, 0, 0), zoom: 1 }; },
+    setCameraTransforms() {},
+    createLayer(model) {
+        if (!__createLayerWarned) {
+            __createLayerWarned = true;
+            __weLog(1, 'thisScene.createLayer is not supported yet (' + model + ')');
+        }
+        return __detachedLayer(String(model));
+    },
+    destroyLayer() {},
+    sortLayer() {},
 };
 globalThis.thisLayer = null;
+globalThis.thisObject = null;
 
 // ---- host entry points -------------------------------------------------
 globalThis.__weTick = function (dt, t, cx, cy, wx, wy, tod) {
@@ -220,17 +343,21 @@ globalThis.__weTick = function (dt, t, cx, cy, wx, wy, tod) {
     i.cursorDelta = new Vec2(cx - i.cursorPosition.x, cy - i.cursorPosition.y);
     i.cursorPosition = new Vec2(cx, cy);
     i.cursorWorldPosition = new Vec3(wx, wy, 0);
+    __runTimers(t);
 };
 
+// some wallpapers refer to the layer as thisObject
 globalThis.__weRun = function (layer, fn, value) {
     globalThis.thisLayer = layer;
-    const r = fn(value);
+    globalThis.thisObject = layer;
+    const r = fn.call(layer, value);
     return r === undefined ? value : r;
 };
 
 globalThis.__weEvent = function (layer, fn, ev) {
     globalThis.thisLayer = layer;
-    fn(ev);
+    globalThis.thisObject = layer;
+    fn.call(layer, ev);
 };
 )JS";
 
@@ -253,6 +380,8 @@ export function random(min = 0, max = 1) { return min + Math.random() * (max - m
 export function randomInt(min, max) { return Math.floor(min + Math.random() * (max - min + 1)); }
 export function degreesToRadians(d) { return d * Math.PI / 180; }
 export function radiansToDegrees(r) { return r * 180 / Math.PI; }
+export function deg2rad(d) { return d * Math.PI / 180; }
+export function rad2deg(r) { return r * 180 / Math.PI; }
 export function repeat(t, len) { return t - Math.floor(t / len) * len; }
 export function pingPong(t, len) { t = repeat(t, len * 2); return len - Math.abs(t - len); }
 export function remap(v, a, b, c, d) { return c + (v - a) * (d - c) / (b - a); }
@@ -279,6 +408,11 @@ export function length(a) { return a.length(); }
 export function normalize(a) { return a.normalize(); }
 export function distance(a, b) { return a.distance(b); }
 export function lerp(a, b, t) { return a.lerp(b, t); }
+// unit vector for an angle in degrees
+export function angleVector2(deg) {
+    const r = deg * Math.PI / 180;
+    return new V2(Math.cos(r), Math.sin(r));
+}
 export function rotate2D(v, angle) {
     const c = Math.cos(angle), s = Math.sin(angle);
     return new V2(v.x * c - v.y * s, v.x * s + v.y * c);

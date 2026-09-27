@@ -20,6 +20,7 @@
 #include "Particle/ParticleSystem.h"
 
 #include "WPShaderValueUpdater.hpp"
+#include "Script/ScriptEngine.hpp"
 #include "wpscene/WPImageObject.h"
 #include "wpscene/WPParticleObject.h"
 #include "wpscene/WPSoundObject.h"
@@ -29,6 +30,7 @@
 #include "Fs/VFS.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -56,6 +58,10 @@ struct ParseContext {
     std::shared_ptr<SceneNode> effect_camera_node;
     std::shared_ptr<SceneNode> global_camera_node;
     std::shared_ptr<SceneNode> global_perspective_camera_node;
+
+    // layer id -> the node carrying that layer's world transform (for
+    // parenting and scripts); filled by the Parse*Obj functions
+    std::unordered_map<i32, SceneNode*> layer_nodes;
 };
 
 using WPObjectVar = std::variant<wpscene::WPImageObject, wpscene::WPParticleObject,
@@ -542,78 +548,6 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
     }
 }
 
-// Layer parenting: a layer with "parent" has origin/angles/scale relative to that
-// layer, and is hidden when it is. Resolve each chain into absolute values so the
-// rest of the parser can keep treating layers as independent.
-void ResolveParenting(std::vector<WPObjectVar>& objs, const nlohmann::json& json_objs) {
-    struct Xform {
-        std::array<float, 3> origin, scale, angles;
-        bool                 visible;
-        i32                  parent;
-    };
-    std::unordered_map<i32, Xform> local;
-    // Every object can be a parent, including plain groups that carry no
-    // image or particle (and so never become a layer): take them from the JSON
-    // first, then let the parsed layers override with their own values.
-    for (const auto& jo : json_objs) {
-        if (! jo.is_object() || ! jo.contains("id")) continue;
-        Xform x { { 0, 0, 0 }, { 1, 1, 1 }, { 0, 0, 0 }, true, -1 };
-        i32   id = -1;
-        GET_JSON_NAME_VALUE_NOWARN(jo, "id", id);
-        GET_JSON_NAME_VALUE_NOWARN(jo, "origin", x.origin);
-        GET_JSON_NAME_VALUE_NOWARN(jo, "scale", x.scale);
-        GET_JSON_NAME_VALUE_NOWARN(jo, "angles", x.angles);
-        GET_JSON_NAME_VALUE_NOWARN(jo, "visible", x.visible);
-        GET_JSON_NAME_VALUE_NOWARN(jo, "parent", x.parent);
-        if (id >= 0) local[id] = x;
-    }
-    auto collect = [&local](auto& o) {
-        local[o.id] = { o.origin, o.scale, o.angles, o.visible, o.parent };
-    };
-    for (auto& obj : objs) {
-        std::visit(visitor::overload { [&](wpscene::WPImageObject& o) { collect(o); },
-                                       [&](wpscene::WPParticleObject& o) { collect(o); },
-                                       [](auto&) {} },
-                   obj);
-    }
-
-    std::unordered_map<i32, Xform> world;
-    std::function<Xform(i32, int)> resolve = [&](i32 id, int depth) -> Xform {
-        if (auto it = world.find(id); it != world.end()) return it->second;
-        Xform x = local.at(id);
-        if (x.parent >= 0 && local.count(x.parent) && depth < 64) {
-            const Xform p = resolve(x.parent, depth + 1);
-            // child origin is in the parent's (scaled, rotated) space
-            const float c = std::cos(p.angles[2]), s = std::sin(p.angles[2]);
-            const float lx = x.origin[0] * p.scale[0], ly = x.origin[1] * p.scale[1];
-            x.origin = { p.origin[0] + lx * c - ly * s,
-                         p.origin[1] + lx * s + ly * c,
-                         p.origin[2] + x.origin[2] * p.scale[2] };
-            for (int i = 0; i < 3; i++) {
-                x.scale[i] *= p.scale[i];
-                x.angles[i] += p.angles[i];
-            }
-            x.visible = x.visible && p.visible;
-        }
-        return world[id] = x;
-    };
-
-    auto apply = [&](auto& o) {
-        if (o.parent < 0 || ! local.count(o.parent)) return;
-        const Xform w = resolve(o.id, 0);
-        o.origin      = w.origin;
-        o.scale       = w.scale;
-        o.angles      = w.angles;
-        o.visible     = w.visible;
-    };
-    for (auto& obj : objs) {
-        std::visit(visitor::overload { [&](wpscene::WPImageObject& o) { apply(o); },
-                                       [&](wpscene::WPParticleObject& o) { apply(o); },
-                                       [](auto&) {} },
-                   obj);
-    }
-}
-
 // A "video texture" is a .tex whose single mip holds an MP4 file verbatim
 // (look for the ISO-BMFF "ftyp" box right after the header). The renderer
 // can't decode it; the host plays it underneath instead (see VideoUnderlay).
@@ -834,10 +768,15 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
             imgEffectLayer->SetOffscreen(isOffscreen);
             imgEffectLayer->FinalMesh().ChangeMeshDataFrom(effct_final_mesh);
             imgEffectLayer->FinalNode().CopyTrans(*spImgNode);
+            imgEffectLayer->FinalNode().ID() = wpimgobj.id;
             if (isCompose) {
             } else {
                 spImgNode->CopyTrans(SceneNode());
             }
+            // the final node carries the layer's world transform (parenting,
+            // scripts); the layer draw and the effect passes follow its visibility
+            spImgNode->SetVisParent(&imgEffectLayer->FinalNode());
+            context.layer_nodes[wpimgobj.id] = &imgEffectLayer->FinalNode();
             scene.cameras.at(nodeAddr)->AttatchImgEffect(imgEffectLayer);
         }
         // set renderTarget for ping-pong operate
@@ -1010,6 +949,7 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
         };
     }
     context.scene->sceneGraph->AppendChild(spImgNode);
+    if (! context.layer_nodes.count(wpimgobj.id)) context.layer_nodes[wpimgobj.id] = spImgNode.get();
 }
 
 struct ParticleChildPtr {
@@ -1195,8 +1135,10 @@ void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& wppartob
 
     if (is_child)
         child_ptr.node_parent->AppendChild(spNode);
-    else
+    else {
         context.scene->sceneGraph->AppendChild(spNode);
+        context.layer_nodes[wppartobj.id] = spNode.get();
+    }
 }
 
 void ParseLightObj(ParseContext& context, wpscene::WPLightObject& light_obj) {
@@ -1213,6 +1155,13 @@ void ParseLightObj(ParseContext& context, wpscene::WPLightObject& light_obj) {
     context.scene->sceneGraph->AppendChild(node);
 }
 
+// {"script": "...", "value": x} on a layer property
+bool HasScript(const nlohmann::json& obj, const char* key) {
+    if (! obj.is_object() || ! obj.contains(key)) return false;
+    const auto& v = obj.at(key);
+    return v.is_object() && v.contains("script") && v.at("script").is_string();
+}
+
 template<typename T>
 void AddWPObject(std::vector<WPObjectVar>& objs, const nlohmann::json& json_obj, fs::VFS& vfs) {
     T wpobj;
@@ -1220,7 +1169,139 @@ void AddWPObject(std::vector<WPObjectVar>& objs, const nlohmann::json& json_obj,
         LOG_ERROR("parse scene object failed, name: %s", wpobj.name.c_str());
         return;
     }
+    // A script drives visibility at runtime: parse the layer as a normal
+    // drawable (not an offscreen dependency); the node starts with the value.
+    if constexpr (requires { wpobj.visible; }) {
+        if (HasScript(json_obj, "visible")) wpobj.visible = true;
+    }
     objs.push_back(wpobj);
+}
+
+// Script bindings on a scene object, with {user, value} property overrides resolved
+std::vector<ScriptBinding> CollectScriptBindings(const nlohmann::json&   obj,
+                                                 const WPUserProperties& user_props) {
+    std::vector<ScriptBinding> out;
+    for (const char* key : { "origin", "angles", "scale", "visible", "alpha" }) {
+        if (! HasScript(obj, key)) continue;
+        const auto&   v = obj.at(key);
+        ScriptBinding b;
+        b.property         = key;
+        b.source           = v.at("script").get<std::string>();
+        b.scriptproperties = nlohmann::json::object();
+        if (v.contains("scriptproperties") && v.at("scriptproperties").is_object()) {
+            for (const auto& [name, pv] : v.at("scriptproperties").items()) {
+                nlohmann::json r = user_props.ResolveValue(pv);
+                if (r.is_object() && r.contains("value")) r = r.at("value");
+                b.scriptproperties[name] = r;
+            }
+        }
+        out.push_back(std::move(b));
+    }
+    return out;
+}
+
+// Runtime scene graph: transform parents for every object (including plain
+// groups that carry no image) and the SceneScript bindings. Draw order stays
+// the file order, only the transform/visibility chain is linked.
+void LinkLayersAndScripts(ParseContext& context, const nlohmann::json& json_objs,
+                          const WPUserProperties& user_props) {
+    auto& scene  = *context.scene;
+    auto  engine = std::make_shared<ScriptEngine>(std::array { context.ortho_w, context.ortho_h },
+                                                 user_props.ToJson());
+
+    struct Pending {
+        int                        layer;
+        std::vector<ScriptBinding> bindings;
+    };
+    std::vector<Pending>          pending;
+    std::unordered_map<i32, int> layer_index; // object id -> engine layer index
+
+    auto isDrawable = [](const nlohmann::json& jo) {
+        for (const char* k : { "image", "particle", "sound", "light" })
+            if (jo.contains(k) && ! jo.at(k).is_null()) return true;
+        return false;
+    };
+
+    for (const auto& jo : json_objs) {
+        if (! jo.is_object()) continue;
+        i32         id = -1;
+        std::string name;
+        GET_JSON_NAME_VALUE_NOWARN(jo, "id", id);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "name", name);
+
+        SceneNode* node = nullptr;
+        if (auto it = context.layer_nodes.find(id); it != context.layer_nodes.end()) {
+            node = it->second;
+        } else if (! isDrawable(jo)) {
+            // group object: transform only
+            std::array<float, 3> origin { 0, 0, 0 }, scale { 1, 1, 1 }, angles { 0, 0, 0 };
+            GET_JSON_NAME_VALUE_NOWARN(jo, "origin", origin);
+            GET_JSON_NAME_VALUE_NOWARN(jo, "scale", scale);
+            GET_JSON_NAME_VALUE_NOWARN(jo, "angles", angles);
+            auto n = std::make_shared<SceneNode>(
+                Vector3f(origin.data()), Vector3f(scale.data()), Vector3f(angles.data()));
+            n->ID() = id;
+            scene.auxNodes.push_back(n);
+            node = n.get();
+            if (id >= 0) context.layer_nodes[id] = node;
+        }
+        if (node != nullptr) {
+            node->SetName(name);
+            // initial visibility (a plain false was already handled as offscreen)
+            if (! isDrawable(jo) || HasScript(jo, "visible")) {
+                bool vis = true;
+                GET_JSON_NAME_VALUE_NOWARN(jo, "visible", vis);
+                node->SetVisible(vis);
+            }
+        }
+
+        std::array<float, 2> size { 0.0f, 0.0f };
+        if (jo.contains("size")) GET_JSON_NAME_VALUE_NOWARN(jo, "size", size);
+        int idx = engine->AddLayer({ node, name, id, size });
+        if (id >= 0) layer_index[id] = idx;
+
+        auto bindings = CollectScriptBindings(jo, user_props);
+        if (! bindings.empty()) pending.push_back({ idx, std::move(bindings) });
+    }
+
+    // parents (skip cycles)
+    for (const auto& jo : json_objs) {
+        if (! jo.is_object()) continue;
+        i32 id = -1, parent = -1;
+        GET_JSON_NAME_VALUE_NOWARN(jo, "id", id);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "parent", parent);
+        if (parent < 0 || parent == id) continue;
+        if (layer_index.count(id) && layer_index.count(parent))
+            engine->SetLayerParent(layer_index.at(id), layer_index.at(parent));
+        auto cit = context.layer_nodes.find(id);
+        auto pit = context.layer_nodes.find(parent);
+        if (cit == context.layer_nodes.end() || pit == context.layer_nodes.end()) continue;
+        bool cycle = false;
+        for (const SceneNode* p = pit->second; p != nullptr; p = p->Parent()) {
+            if (p == cit->second) {
+                cycle = true;
+                break;
+            }
+        }
+        if (cycle) {
+            LOG_ERROR("layer %d: parent chain loops, ignored", id);
+            continue;
+        }
+        cit->second->SetParent(pit->second);
+    }
+
+    // scripts, after every layer exists (init() may look others up).
+    // WP_SCENESCRIPT=0 leaves layers at their static values (debugging).
+    if (const char* e = std::getenv("WP_SCENESCRIPT"); e != nullptr && e[0] == '0') {
+        LOG_INFO("SceneScript disabled by WP_SCENESCRIPT=0");
+        pending.clear();
+    }
+    for (auto& p : pending)
+        for (auto& b : p.bindings) engine->AddBinding(p.layer, b);
+    if (! engine->Empty()) {
+        LOG_INFO("SceneScript: %zu script binding(s) active", pending.size());
+        scene.scriptEngine = engine;
+    }
 }
 } // namespace
 
@@ -1284,8 +1365,6 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         sc.general.orthogonalprojection.width  = w;
         sc.general.orthogonalprojection.height = h;
     }
-
-    ResolveParenting(wp_objs, json.at("objects"));
 
     // Video underlay: the bottom layer is an embedded MP4 the renderer can't
     // decode. Drop it and render the rest over a transparent background; the
@@ -1352,5 +1431,7 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
     }
 
     WPShaderParser::FinalGlslang();
+
+    LinkLayersAndScripts(context, json.at("objects"), userProps);
     return context.scene;
 }
