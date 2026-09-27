@@ -52,6 +52,12 @@ struct WPShaderValueData {
     std::vector<std::pair<usize, std::string>> renderTargets;
 
     WPPuppetLayer puppet_layer;
+
+    // For an effect pass: the layer it belongs to (its final node carries the
+    // layer's world transform) and the layer size, for
+    // g_EffectTextureProjectionMatrix.
+    const SceneNode*     effect_layer { nullptr };
+    std::array<float, 2> effect_layer_size { 0.0f, 0.0f };
 };
 
 struct WPCameraParallax {

@@ -962,6 +962,8 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
                     ShaderValue::fromMatrix(Eigen::Matrix4f::Identity());
                 SceneMaterial     material;
                 WPShaderValueData svData;
+                svData.effect_layer      = &imgEffectLayer->FinalNode();
+                svData.effect_layer_size = { wpimgobj.size[0], wpimgobj.size[1] };
                 if (! LoadMaterial(vfs,
                                    wpmat,
                                    context.scene.get(),

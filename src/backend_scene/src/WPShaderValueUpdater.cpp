@@ -171,21 +171,26 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, sprite_map_t& sprite
             updateOp(G_MVP, ShaderValue::fromMatrix(mvpTrans));
             if (reqMVPI) updateOp(G_MVPI, ShaderValue::fromMatrix(mvpTrans.inverse()));
         }
-        if (reqETVP || reqETVPI) {
-            /*
-            Vector3d nodePos = pNode->Translate().cast<double>();
-            nodePos.z()      = 1.0f;
-            Matrix4d etvpTrans =
-                viewProTrans * modelTrans * Affine3d(Eigen::Scaling(nodePos)).matrix();
-            if (reqETVPI) updateOp(G_ETVP, ShaderValue::fromMatrix(etvpTrans));
-            if (reqETVPI) updateOp(G_ETVPI, ShaderValue::fromMatrix(etvpTrans.inverse()));
-            */
-        }
     }
 
-    //	g_EffectTextureProjectionMatrix
-    // shadervs.push_back({"g_EffectTextureProjectionMatrixInverse",
-    // ShaderValue::ValueOf(Eigen::Matrix4f::Identity())});
+    // g_EffectTextureProjectionMatrix: maps the owning layer's normalised space
+    // ([-1,1] across the layer) to screen NDC; effects use its inverse to bring
+    // g_PointerPosition into layer space (cursor-following eyes etc.).
+    if ((reqETVP || reqETVPI) && hasNodeData) {
+        const auto& nodeData = m_nodeDataMap.at(pNode);
+        Matrix4d    etvp     = Matrix4d::Identity();
+        if (nodeData.effect_layer != nullptr && m_scene->cameras.count("global") > 0) {
+            const Matrix4d vp = m_scene->cameras.at("global")->GetViewProjectionMatrix();
+            const Matrix4d m  = nodeData.effect_layer->ModelTrans();
+            const Matrix4d s  = Affine3d(Eigen::Scaling(nodeData.effect_layer_size[0] * 0.5,
+                                                        nodeData.effect_layer_size[1] * 0.5,
+                                                        1.0))
+                                   .matrix();
+            etvp = vp * m * s;
+        }
+        if (reqETVP) updateOp(G_ETVP, ShaderValue::fromMatrix(etvp));
+        if (reqETVPI) updateOp(G_ETVPI, ShaderValue::fromMatrix(etvp.inverse()));
+    }
     if (info.has_TIME) updateOp(G_TIME, (float)m_scene->elapsingTime);
 
     if (info.has_DAYTIME) updateOp(G_DAYTIME, (float)m_dayTime);
