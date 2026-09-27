@@ -48,7 +48,6 @@ static constexpr const char* pre_shader_code = R"(#version 330
 #define ddy(x) dFdy(-(x))
 #define saturate(x) (clamp(x, 0.0, 1.0))
 
-#define max(x, y) max(y, x)
 
 #define float1 float
 #define float2 vec2
@@ -61,6 +60,20 @@ static constexpr const char* pre_shader_code = R"(#version 330
 vec2 pow(vec2 x, float y) { return pow(x, vec2(y)); }
 vec3 pow(vec3 x, float y) { return pow(x, vec3(y)); }
 vec4 pow(vec4 x, float y) { return pow(x, vec4(y)); }
+// HLSL accepts the scalar in either position of max/min; GLSL only as the
+// second argument. (An argument-swapping macro used to do this, but it broke
+// the already-valid max(vecN, scalar) order.)
+vec2 max(float x, vec2 y) { return max(y, x); }
+vec3 max(float x, vec3 y) { return max(y, x); }
+vec4 max(float x, vec4 y) { return max(y, x); }
+vec2 min(float x, vec2 y) { return min(y, x); }
+vec3 min(float x, vec3 y) { return min(y, x); }
+vec4 min(float x, vec4 y) { return min(y, x); }
+// HLSL also promotes int literals: max(0, x)
+float max(int x, float y) { return max(float(x), y); }
+float max(float x, int y) { return max(x, float(y)); }
+float min(int x, float y) { return min(float(x), y); }
+float min(float x, int y) { return min(x, float(y)); }
 
 __SHADER_PLACEHOLD__
 
