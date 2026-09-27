@@ -286,10 +286,21 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                 }
                 anims.resize(anim_num);
                 for (auto& anim : anims) {
-                    // there can be a variable number of 32-bit 0s between animations
+                    // there can be a variable number of 32-bit 0s between animations,
+                    // and (MDLA 6) a single stray zero byte right before the id: reading
+                    // through it shifts the id by 8 bits (97 -> 24832) and desyncs the
+                    // rest of the record. Skip whole zero words, then a lone zero byte
+                    // whenever the word starting there is not zero.
                     anim.id = 0;
-                    while (anim.id == 0 && remaining() >= 4) {
-                        anim.id = f.ReadInt32();
+                    while (remaining() >= 4) {
+                        u32 word = f.ReadUint32();
+                        if (word == 0) continue;
+                        if ((word & 0xFFu) == 0) {
+                            f.SeekCur(-3); // drop the stray byte, re-read from the next one
+                            continue;
+                        }
+                        anim.id = (i32)word;
+                        break;
                     }
 
                     if (anim.id <= 0) {

@@ -150,9 +150,16 @@ void WPPuppetLayer::prepared(std::span<AnimationLayer> alayers) {
     double& blend       = m_global_blend;
     double& total_blend = m_total_blend;
 
+    // Only layers that actually resolve to an animation take part, otherwise the
+    // base pose is applied at less than 1.0 and the skeleton shrinks along its
+    // parent chain.
     total_blend = 0.0;
     for (int i = 0; i < alayers.size(); i++) {
-        if (alayers[i].visible) {
+        const auto& anims = m_puppet->anims;
+        bool        found = std::find_if(anims.begin(), anims.end(), [&](auto& a) {
+                         return alayers[i].id == a.id;
+                     }) != anims.end();
+        if (alayers[i].visible && found) {
             total_blend += alayers[i].blend;
         }
     }
