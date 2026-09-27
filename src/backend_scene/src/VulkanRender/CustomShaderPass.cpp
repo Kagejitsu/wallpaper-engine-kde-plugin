@@ -148,9 +148,12 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
         // not be cached as frame-static. Covers time, cursor/parallax, and puppet
         // bones (driven by frameTime). Check every uniform block, not just the first.
         for (auto& block : ref.blocks) {
+            bool audio = false;
+            for (auto name : G_AUDIO_SPECTRUM) audio = audio || exists(block.member_map, name);
             if (exists(block.member_map, G_TIME) || exists(block.member_map, G_DAYTIME) ||
                 exists(block.member_map, G_POINTERPOSITION) ||
-                exists(block.member_map, G_PARALLAXPOSITION) || exists(block.member_map, G_BONES)) {
+                exists(block.member_map, G_PARALLAXPOSITION) || exists(block.member_map, G_BONES) ||
+                audio) {
                 m_uses_time_uniforms = true;
                 break;
             }

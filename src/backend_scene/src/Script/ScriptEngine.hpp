@@ -19,6 +19,8 @@
 #include <nlohmann/json.hpp>
 #include <quickjs.h>
 
+#include "Audio/AudioCapture.h"
+
 namespace wallpaper
 {
 class SceneNode;
@@ -55,7 +57,14 @@ public:
     bool AddBinding(int layer_index, const ScriptBinding& binding);
 
     // Once per frame on the render thread, before uniforms are built.
-    void Tick(double frametime, double runtime, const ScriptInput& input);
+    // `audio` may be null (no capture); it is only read when a script has
+    // called engine.registerAudioBuffers().
+    void Tick(double frametime, double runtime, const ScriptInput& input,
+              const audio::AudioSpectrum* audio = nullptr);
+
+    // A script asked for audio buffers: the host should acquire a capture.
+    bool WantsAudio() const { return m_wants_audio; }
+    void SetWantsAudio() { m_wants_audio = true; }
 
     // Fire an event hook on every binding that exports it (e.g. "cursorClick").
     void FireEvent(std::string_view name, const ScriptInput& input);
@@ -93,6 +102,7 @@ private:
     std::unique_ptr<Impl>                 m_impl;
     double                                m_deadline { 0.0 };
     bool                                  m_ok { false };
+    bool                                  m_wants_audio { false };
 
     // quickjs callbacks
     static int          InterruptCb(JSRuntime*, void* opaque);

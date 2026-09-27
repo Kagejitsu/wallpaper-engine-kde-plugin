@@ -39,6 +39,8 @@ struct WPUniformInfo {
     bool has_SCREEN { false };
     bool has_LP { false };
     bool has_COLOR4 { false };
+    // g_AudioSpectrum{16,32,64}{Left,Right}, see G_AUDIO_SPECTRUM
+    std::array<bool, 6> has_AUDIO {};
 
     struct Tex {
         bool has_resolution { false };

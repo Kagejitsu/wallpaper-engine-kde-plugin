@@ -18,6 +18,7 @@
 #include "WPPkgFs.hpp"
 
 #include "Audio/SoundManager.h"
+#include "Audio/AudioCapture.h"
 
 #include "RenderGraph/RenderGraph.hpp"
 
@@ -285,8 +286,12 @@ private:
 
                 // SceneScript: drive scripted layer properties for this frame
                 if (m_scene->scriptEngine) {
-                    m_scene->scriptEngine->Tick(
-                        m_scene->frameTime, m_scene->elapsingTime, ScriptInput { pos });
+                    auto& eng = *m_scene->scriptEngine;
+                    if (eng.WantsAudio() && ! m_scene->audioCapture)
+                        m_scene->audioCapture = audio::AudioCapture::Acquire();
+                    const audio::AudioSpectrum* sp =
+                        m_scene->audioCapture ? &m_scene->audioCapture->Spectrum() : nullptr;
+                    eng.Tick(m_scene->frameTime, m_scene->elapsingTime, ScriptInput { pos }, sp);
                 }
             }
             m_scene->paritileSys->Emitt();

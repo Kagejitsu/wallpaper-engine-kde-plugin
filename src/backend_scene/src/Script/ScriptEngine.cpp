@@ -135,6 +135,11 @@ JSValue js_log(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     return JS_UNDEFINED;
 }
 
+JSValue js_audio_wanted(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    if (auto* eng = EngineOf(ctx)) eng->SetWantsAudio();
+    return JS_UNDEFINED;
+}
+
 JSValue js_layer_count(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     auto* eng = EngineOf(ctx);
     return JS_NewInt32(ctx, eng ? eng->LayerCount() : 0);
@@ -310,6 +315,7 @@ struct ScriptEngine::Impl {
     JSValue run_fn { JS_UNDEFINED };
     JSValue event_fn { JS_UNDEFINED };
     JSValue tick_fn { JS_UNDEFINED };
+    JSValue audio_fn { JS_UNDEFINED };
     // one JS object per registered layer, created lazily
     std::vector<JSValue> layer_objs;
 
@@ -347,6 +353,7 @@ ScriptEngine::~ScriptEngine() {
         JS_FreeValue(I.ctx, I.run_fn);
         JS_FreeValue(I.ctx, I.event_fn);
         JS_FreeValue(I.ctx, I.tick_fn);
+        JS_FreeValue(I.ctx, I.audio_fn);
         JS_FreeContext(I.ctx);
     }
     if (I.rt != nullptr) JS_FreeRuntime(I.rt);
@@ -383,6 +390,10 @@ bool ScriptEngine::initRuntime() {
         I.ctx, global, "__weLayerCount", JS_NewCFunction(I.ctx, js_layer_count, "__weLayerCount", 0));
     JS_SetPropertyStr(
         I.ctx, global, "__weLayerAt", JS_NewCFunction(I.ctx, js_layer_at, "__weLayerAt", 1));
+    JS_SetPropertyStr(I.ctx,
+                      global,
+                      "__weAudioWanted",
+                      JS_NewCFunction(I.ctx, js_audio_wanted, "__weAudioWanted", 0));
 
     beginBudget(kSetupBudgetSec);
     JSValue r = JS_Eval(
@@ -397,6 +408,7 @@ bool ScriptEngine::initRuntime() {
     I.run_fn   = JS_GetPropertyStr(I.ctx, global, "__weRun");
     I.event_fn = JS_GetPropertyStr(I.ctx, global, "__weEvent");
     I.tick_fn  = JS_GetPropertyStr(I.ctx, global, "__weTick");
+    I.audio_fn = JS_GetPropertyStr(I.ctx, global, "__weAudioUpdate");
 
     // engine.canvasSize / engine.userProperties
     {
@@ -679,7 +691,8 @@ void ScriptEngine::runBinding(Binding& b, JSValueConst fn, std::string_view what
     JS_FreeValue(I.ctx, layer);
 }
 
-void ScriptEngine::Tick(double frametime, double runtime, const ScriptInput& input) {
+void ScriptEngine::Tick(double frametime, double runtime, const ScriptInput& input,
+                        const audio::AudioSpectrum* audio) {
     if (! m_ok || m_bindings.empty()) return;
     auto& I = *m_impl;
     JS_UpdateStackTop(I.rt); // we may be on a different thread than the parser
@@ -699,6 +712,20 @@ void ScriptEngine::Tick(double frametime, double runtime, const ScriptInput& inp
         JSValue r = JS_Call(I.ctx, I.tick_fn, JS_UNDEFINED, 7, argv);
         if (JS_IsException(r)) logException("tick");
         JS_FreeValue(I.ctx, r);
+    }
+    // registered audio buffers: hand the 64-band L/R spectrum to the prelude
+    if (m_wants_audio && audio != nullptr && audio->active) {
+        JSValue l = JS_NewArray(I.ctx), rr = JS_NewArray(I.ctx);
+        for (uint32_t i = 0; i < (uint32_t)audio::kSpectrumBands; i++) {
+            JS_SetPropertyUint32(I.ctx, l, i, JS_NewFloat64(I.ctx, audio->left[i]));
+            JS_SetPropertyUint32(I.ctx, rr, i, JS_NewFloat64(I.ctx, audio->right[i]));
+        }
+        JSValue argv[2] = { l, rr };
+        JSValue r       = JS_Call(I.ctx, I.audio_fn, JS_UNDEFINED, 2, argv);
+        if (JS_IsException(r)) logException("audio");
+        JS_FreeValue(I.ctx, r);
+        JS_FreeValue(I.ctx, l);
+        JS_FreeValue(I.ctx, rr);
     }
 
     for (auto& b : m_bindings) {

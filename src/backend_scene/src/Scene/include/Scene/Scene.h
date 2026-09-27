@@ -19,6 +19,10 @@ namespace fs
 class VFS;
 }
 class ScriptEngine;
+namespace audio
+{
+class AudioCapture;
+}
 
 class Scene : NoCopy, NoMove {
 public:
@@ -46,6 +50,8 @@ public:
     std::vector<std::shared_ptr<SceneNode>> auxNodes;
     // SceneScript engine, if the scene has any script bindings
     std::shared_ptr<ScriptEngine> scriptEngine;
+    // system-audio spectrum, acquired lazily when a shader or script asks for it
+    std::shared_ptr<audio::AudioCapture> audioCapture;
     std::unique_ptr<IShaderValueUpdater> shaderValueUpdater;
     std::unique_ptr<IImageParser>        imageParser;
     std::unique_ptr<fs::VFS>             vfs;

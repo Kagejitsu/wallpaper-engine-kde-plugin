@@ -171,6 +171,29 @@ function __runTimers(now) {
     }
 }
 
+const __audioBuffers = [];
+function __resampleBands(src, n) {
+    const per = Math.max(1, Math.floor(src.length / n));
+    const out = new Array(n);
+    for (let b = 0; b < n; b++) {
+        let s = 0, c = 0;
+        for (let k = b * per; k < (b + 1) * per && k < src.length; k++, c++) s += src[k];
+        out[b] = c > 0 ? s / c : 0;
+    }
+    return out;
+}
+// host: 64-band left/right spectrum for this frame
+globalThis.__weAudioUpdate = function (left, right) {
+    for (const buf of __audioBuffers) {
+        const l = __resampleBands(left, buf.resolution), r = __resampleBands(right, buf.resolution);
+        for (let i = 0; i < buf.resolution; i++) {
+            buf.left[i] = l[i];
+            buf.right[i] = r[i];
+            buf.average[i] = 0.5 * (l[i] + r[i]);
+        }
+    }
+};
+
 globalThis.engine = {
     frametime: 0,
     runtime: 0,
@@ -193,14 +216,20 @@ globalThis.engine = {
     clearInterval(id) { __timers.delete(id); },
     openUserShortcut() {},
     registerListener() {},
-    // Audio response is not captured yet: hand out silent buffers of the
-    // requested resolution so visualiser scripts run (flat) instead of failing.
+    // Audio buffers are filled from the host's system-audio capture every
+    // frame (__weAudioUpdate); silent until capture delivers data.
     registerAudioBuffers(resolution) {
         const n = Math.max(1, Math.min(64, resolution | 0));
         const z = () => new Array(n).fill(0);
-        return { resolution: n, average: z(), left: z(), right: z() };
+        const buf = { resolution: n, average: z(), left: z(), right: z() };
+        __audioBuffers.push(buf);
+        __weAudioWanted();
+        return buf;
     },
-    unregisterAudioBuffers() {},
+    unregisterAudioBuffers(buf) {
+        const i = __audioBuffers.indexOf(buf);
+        if (i >= 0) __audioBuffers.splice(i, 1);
+    },
     setDynamicPerformanceMode() {},
 };
 

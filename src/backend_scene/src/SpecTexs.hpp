@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <string_view>
 #include <cstdint>
 #include "Core/Literals.hpp"
@@ -74,6 +75,13 @@ constexpr std::string_view G_BONES { "g_Bones" };
 constexpr std::string_view G_SCREEN { "g_Screen" };
 constexpr std::string_view G_PARALLAXPOSITION { "g_ParallaxPosition" };
 constexpr std::string_view G_COLOR4 { "g_Color4" };
+
+// audio spectrum uniforms: index = resolution slot (16/32/64) * 2 + channel (L/R)
+constexpr std::array<std::string_view, 6> G_AUDIO_SPECTRUM {
+    "g_AudioSpectrum16Left",  "g_AudioSpectrum16Right", "g_AudioSpectrum32Left",
+    "g_AudioSpectrum32Right", "g_AudioSpectrum64Left",  "g_AudioSpectrum64Right",
+};
+constexpr std::array<int, 3> G_AUDIO_RESOLUTIONS { 16, 32, 64 };
 
 constexpr std::string_view SpecTex_Default { "_rt_default" };
 constexpr std::string_view SpecTex_Link { "_rt_link_" };

@@ -1,4 +1,7 @@
 #include "WPShaderValueUpdater.hpp"
+#include "Audio/AudioCapture.h"
+#include <algorithm>
+#include <cstdlib>
 #include "Eigen/src/Core/Matrix.h"
 #include "Eigen/src/Geometry/Transform.h"
 #include "Scene/Scene.h"
@@ -74,6 +77,11 @@ void WPShaderValueUpdater::InitUniforms(SceneNode* pNode, const ExistsUniformOp&
     info.has_SCREEN        = existsOp(G_SCREEN);
     info.has_LP            = existsOp(G_LP);
     info.has_COLOR4        = existsOp(G_COLOR4);
+    for (size_t i = 0; i < G_AUDIO_SPECTRUM.size(); i++) {
+        info.has_AUDIO[i] = existsOp(G_AUDIO_SPECTRUM[i]);
+        if (info.has_AUDIO[i] && ! m_scene->audioCapture)
+            m_scene->audioCapture = audio::AudioCapture::Acquire();
+    }
 
     std::accumulate(begin(info.texs), end(info.texs), 0, [&existsOp](uint index, auto& value) {
         value.has_resolution = existsOp(WE_GLTEX_RESOLUTION_NAMES[index]);
@@ -194,6 +202,27 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, sprite_map_t& sprite
         if (reqETVPI) updateOp(G_ETVPI, ShaderValue::fromMatrix(etvp.inverse()));
     }
     if (info.has_TIME) updateOp(G_TIME, (float)m_scene->elapsingTime);
+
+    // audio spectrum: 64 bands captured, 16/32 averaged down
+    if (m_scene->audioCapture &&
+        std::any_of(info.has_AUDIO.begin(), info.has_AUDIO.end(), [](bool b) { return b; })) {
+        const auto& sp = m_scene->audioCapture->Spectrum();
+        for (size_t i = 0; i < G_AUDIO_SPECTRUM.size(); i++) {
+            if (! info.has_AUDIO[i]) continue;
+            const int   bands = G_AUDIO_RESOLUTIONS[i / 2];
+            const auto& src   = (i % 2 == 0) ? sp.left : sp.right;
+            std::array<float, audio::kSpectrumBands> out {};
+            audio::ResampleBands(src, out.data(), bands);
+            updateOp(G_AUDIO_SPECTRUM[i], std::span<const float> { out.data(), (size_t)bands });
+            static const bool debug = std::getenv("WP_AUDIO_DEBUG") != nullptr;
+            if (debug) {
+                static int logged = 0;
+                if (logged++ % 300 == 0)
+                    LOG_INFO("audio uniform %s -> [%.2f %.2f %.2f %.2f ...]",
+                             G_AUDIO_SPECTRUM[i].data(), out[0], out[1], out[2], out[3]);
+            }
+        }
+    }
 
     // script-driven layer alpha
     if (info.has_COLOR4 && hasNodeData && pNode->Alpha() >= 0.0f) {
