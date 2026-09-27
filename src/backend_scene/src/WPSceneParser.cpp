@@ -545,13 +545,28 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
 // Layer parenting: a layer with "parent" has origin/angles/scale relative to that
 // layer, and is hidden when it is. Resolve each chain into absolute values so the
 // rest of the parser can keep treating layers as independent.
-void ResolveParenting(std::vector<WPObjectVar>& objs) {
+void ResolveParenting(std::vector<WPObjectVar>& objs, const nlohmann::json& json_objs) {
     struct Xform {
         std::array<float, 3> origin, scale, angles;
         bool                 visible;
         i32                  parent;
     };
     std::unordered_map<i32, Xform> local;
+    // Every object can be a parent, including plain groups that carry no
+    // image or particle (and so never become a layer): take them from the JSON
+    // first, then let the parsed layers override with their own values.
+    for (const auto& jo : json_objs) {
+        if (! jo.is_object() || ! jo.contains("id")) continue;
+        Xform x { { 0, 0, 0 }, { 1, 1, 1 }, { 0, 0, 0 }, true, -1 };
+        i32   id = -1;
+        GET_JSON_NAME_VALUE_NOWARN(jo, "id", id);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "origin", x.origin);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "scale", x.scale);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "angles", x.angles);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "visible", x.visible);
+        GET_JSON_NAME_VALUE_NOWARN(jo, "parent", x.parent);
+        if (id >= 0) local[id] = x;
+    }
     auto collect = [&local](auto& o) {
         local[o.id] = { o.origin, o.scale, o.angles, o.visible, o.parent };
     };
@@ -1268,7 +1283,7 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         sc.general.orthogonalprojection.height = h;
     }
 
-    ResolveParenting(wp_objs);
+    ResolveParenting(wp_objs, json.at("objects"));
 
     // Video underlay: the bottom layer is an embedded MP4 the renderer can't
     // decode. Drop it and render the rest over a transparent background; the
