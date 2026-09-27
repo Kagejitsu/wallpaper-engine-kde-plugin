@@ -44,6 +44,7 @@ void SceneImageEffectLayer::ResolveEffect(const SceneMesh& default_mesh,
                 material.blenmode = BlendMode::Normal;
                 it->sceneNode->SetCamera(effect_cam.data());
                 it->sceneNode->CopyTrans(default_node);
+                it->sceneNode->SetVisParent(m_final_node.get());
                 it->sceneNode->Mesh()->ChangeMeshDataFrom(default_mesh);
             }
 
@@ -68,7 +69,11 @@ void SceneImageEffectLayer::ResolveEffect(const SceneMesh& default_mesh,
         {
             material.blenmode = m_final_blend;
             last_output->sceneNode->SetCamera(std::string());
-            last_output->sceneNode->CopyTrans(*m_final_node);
+            // Follow the layer's (possibly script-driven) transform at runtime
+            // instead of copying it once.
+            last_output->sceneNode->CopyTrans(default_node);
+            last_output->sceneNode->SetParent(m_final_node.get());
+            last_output->sceneNode->SetVisParent(m_final_node.get());
             mesh.ChangeMeshDataFrom(*m_final_mesh);
         }
     }

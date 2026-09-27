@@ -207,8 +207,9 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
         auto  wit          = scene.rt_writer_count.find(m_desc.output);
         bool  sole_writer  = wit != scene.rt_writer_count.end() && wit->second == 1;
         auto& out_rt       = scene.renderTargets.at(m_desc.output);
+        bool  dynamic_node = m_desc.node != nullptr && m_desc.node->IsDynamic();
         m_frame_static     = scene.cache_passes && isStatic() && ! m_uses_time_uniforms &&
-                         inputs_static && sole_writer && out_rt.allowReuse;
+                         ! dynamic_node && inputs_static && sole_writer && out_rt.allowReuse;
         scene.rt_frame_static[m_desc.output] = m_frame_static;
     }
 
@@ -450,6 +451,8 @@ void CustomShaderPass::execute(const Device&, RenderingResources& rr) {
     // Skip frame-static passes after their first execution: the output is pinned
     // and already holds the result in SHADER_READ_ONLY for downstream passes.
     if (m_frame_static && m_cached) return;
+    // runtime visibility (scripts / hidden parents)
+    if (m_desc.node != nullptr && ! m_desc.node->IsVisible()) return;
 
     if (m_desc.update_op) m_desc.update_op();
 

@@ -18,6 +18,8 @@ namespace fs
 {
 class VFS;
 }
+class ScriptEngine;
+
 class Scene : NoCopy, NoMove {
 public:
     Scene();
@@ -40,6 +42,10 @@ public:
     std::vector<std::unique_ptr<SceneLight>> lights;
 
     std::shared_ptr<SceneNode>           sceneGraph;
+    // transform-only nodes (WE group objects) that are not drawn but parent others
+    std::vector<std::shared_ptr<SceneNode>> auxNodes;
+    // SceneScript engine, if the scene has any script bindings
+    std::shared_ptr<ScriptEngine> scriptEngine;
     std::unique_ptr<IShaderValueUpdater> shaderValueUpdater;
     std::unique_ptr<IImageParser>        imageParser;
     std::unique_ptr<fs::VFS>             vfs;

@@ -73,6 +73,7 @@ void WPShaderValueUpdater::InitUniforms(SceneNode* pNode, const ExistsUniformOp&
     info.has_TEXELSIZEHALF = existsOp(G_TEXELSIZEHALF);
     info.has_SCREEN        = existsOp(G_SCREEN);
     info.has_LP            = existsOp(G_LP);
+    info.has_COLOR4        = existsOp(G_COLOR4);
 
     std::accumulate(begin(info.texs), end(info.texs), 0, [&existsOp](uint index, auto& value) {
         value.has_resolution = existsOp(WE_GLTEX_RESOLUTION_NAMES[index]);
@@ -146,7 +147,8 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, sprite_map_t& sprite
         if (hasNodeData && cam_name != "effect") {
             const auto& nodeData = m_nodeDataMap.at(pNode);
             if (m_parallax.enable) {
-                Vector3f nodePos = pNode->Translate();
+                // world position: layers may be parented at runtime
+                Vector3f nodePos = modelTrans.block<3, 1>(0, 3).cast<float>();
                 Vector2f depth(&nodeData.parallaxDepth[0]);
                 Vector2f ortho { (float)m_scene->ortho[0], (float)m_scene->ortho[1] };
                 // flip mouse y axis
@@ -192,6 +194,12 @@ void WPShaderValueUpdater::UpdateUniforms(SceneNode* pNode, sprite_map_t& sprite
         if (reqETVPI) updateOp(G_ETVPI, ShaderValue::fromMatrix(etvp.inverse()));
     }
     if (info.has_TIME) updateOp(G_TIME, (float)m_scene->elapsingTime);
+
+    // script-driven layer alpha
+    if (info.has_COLOR4 && hasNodeData && pNode->Alpha() >= 0.0f) {
+        const auto& c = m_nodeDataMap.at(pNode).color;
+        updateOp(G_COLOR4, std::array<float, 4> { c[0], c[1], c[2], pNode->Alpha() });
+    }
 
     if (info.has_DAYTIME) updateOp(G_DAYTIME, (float)m_dayTime);
 

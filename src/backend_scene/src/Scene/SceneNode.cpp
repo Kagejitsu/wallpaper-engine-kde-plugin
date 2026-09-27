@@ -18,20 +18,20 @@ Matrix4d SceneNode::GetLocalTrans() const {
     return trans.matrix();
 }
 
-void SceneNode::UpdateTrans() {
-    if (! m_dirty) return;
-    m_dirty = false;
-
-    if (m_parent) {
-        m_parent->UpdateTrans();
-    }
+void SceneNode::UpdateTrans() const {
+    if (m_parent) m_parent->UpdateTrans();
+    const u64 parent_version = m_parent ? m_parent->m_version : 0;
+    if (! m_dirty && parent_version == m_parent_version) return;
+    m_dirty          = false;
+    m_parent_version = parent_version;
     {
         Affine3d trans = Affine3d::Identity();
         if (m_parent) {
-            trans *= m_parent->ModelTrans();
+            trans *= m_parent->m_trans;
         }
         m_trans = (trans * GetLocalTrans()).matrix();
     }
+    m_version++;
 }
 
 void SceneNode::MarkTransDirty() {

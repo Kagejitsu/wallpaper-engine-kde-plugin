@@ -39,18 +39,58 @@ public:
 
     const auto& Translate() const { return m_translate; }
     const auto& Rotation() const { return m_rotation; }
-    void        SetRotation(Eigen::Vector3f v) { m_rotation = v; }
-    void        SetTranslate(Eigen::Vector3f v) { m_translate = v; }
+    const auto& Scale() const { return m_scale; }
+    void        SetRotation(Eigen::Vector3f v) { m_rotation = v; MarkTransDirty(); }
+    void        SetTranslate(Eigen::Vector3f v) { m_translate = v; MarkTransDirty(); }
+    void        SetScale(Eigen::Vector3f v) { m_scale = v; MarkTransDirty(); }
+
+    // Transform parent without changing the draw order (WE draws layers in
+    // file order regardless of nesting). Set on nodes that are drawn from the
+    // root; children get their world transform through the chain.
+    void       SetParent(SceneNode* p) { m_parent = p; MarkTransDirty(); }
+    SceneNode* Parent() const { return m_parent; }
+
+    // Runtime visibility: a node is drawn only if it and its ancestors (transform
+    // parent, or an explicit visibility parent for nodes that must not inherit
+    // the transform, e.g. effect passes) are visible.
+    void       SetVisible(bool v) { m_visible = v; }
+    bool       VisibleSelf() const { return m_visible; }
+    void       SetVisParent(SceneNode* p) { m_vis_parent = p; }
+    bool       IsVisible() const {
+        if (! m_visible) return false;
+        const SceneNode* p = m_vis_parent != nullptr ? m_vis_parent : m_parent;
+        return p == nullptr || p->IsVisible();
+    }
+
+    // Per-layer opacity that scripts may drive at runtime (< 0 = not overridden)
+    void  SetAlpha(float a) { m_alpha = a; }
+    float Alpha() const { return m_alpha; }
+
+    // A node whose transform may change every frame (script driven), directly or
+    // through a parent: passes drawing it must not be cached as frame-static.
+    void SetDynamic(bool v) { m_dynamic = v; }
+    bool IsDynamic() const {
+        if (m_dynamic) return true;
+        const SceneNode* p = m_vis_parent != nullptr ? m_vis_parent : m_parent;
+        return p != nullptr && p->IsDynamic();
+    }
+
+    const std::string& Name() const { return m_name; }
+    void               SetName(std::string_view n) { m_name = n; }
 
     void CopyTrans(const SceneNode& node) {
         m_translate = node.m_translate;
         m_scale     = node.m_scale;
         m_rotation  = node.m_rotation;
+        MarkTransDirty();
     }
 
-    // update self modle trans (will update parent before)
-    void            UpdateTrans();
-    Eigen::Matrix4d ModelTrans() const { return m_trans; };
+    // update self model trans (updates the parent chain first; cheap when clean)
+    void            UpdateTrans() const;
+    Eigen::Matrix4d ModelTrans() const {
+        UpdateTrans();
+        return m_trans;
+    };
 
     SceneMesh* Mesh() { return m_mesh.get(); }
     bool       HasMaterial() const { return m_mesh && m_mesh->Material() != nullptr; };
@@ -69,10 +109,18 @@ private:
 
     i32         m_id;
     bool        m_offscreen { false };
+    bool        m_visible { true };
+    bool        m_dynamic { false };
+    float       m_alpha { -1.0f };
+    SceneNode*  m_vis_parent { nullptr };
     std::string m_name;
 
-    bool            m_dirty;
-    Eigen::Matrix4d m_trans;
+    mutable bool            m_dirty;
+    mutable Eigen::Matrix4d m_trans { Eigen::Matrix4d::Identity() };
+    // recompute bookkeeping: a child re-derives its world transform whenever the
+    // parent's version moved, so transform-only parents (not in m_children) work
+    mutable u64 m_version { 0 };
+    mutable u64 m_parent_version { 0 };
 
     Eigen::Vector3f m_translate { 0.0f, 0.0f, 0.0f };
     Eigen::Vector3f m_scale { 1.0f, 1.0f, 1.0f };

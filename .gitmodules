@@ -13,3 +13,6 @@
 [submodule "src/backend_scene/third_party/nlohmann"]
 	path = src/backend_scene/third_party/nlohmann
 	url = https://github.com/nlohmann/json.git
+[submodule "src/backend_scene/third_party/quickjs"]
+	path = src/backend_scene/third_party/quickjs
+	url = https://github.com/quickjs-ng/quickjs.git

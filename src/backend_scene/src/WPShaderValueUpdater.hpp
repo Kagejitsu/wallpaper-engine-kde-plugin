@@ -38,6 +38,7 @@ struct WPUniformInfo {
     bool has_TEXELSIZEHALF { false };
     bool has_SCREEN { false };
     bool has_LP { false };
+    bool has_COLOR4 { false };
 
     struct Tex {
         bool has_resolution { false };
@@ -58,6 +59,9 @@ struct WPShaderValueData {
     // g_EffectTextureProjectionMatrix.
     const SceneNode*     effect_layer { nullptr };
     std::array<float, 2> effect_layer_size { 0.0f, 0.0f };
+
+    // layer colour, for re-issuing g_Color4 when a script drives the alpha
+    std::array<float, 3> color { 1.0f, 1.0f, 1.0f };
 };
 
 struct WPCameraParallax {
