@@ -4,11 +4,13 @@ import QtWebChannel 1.10
 import com.github.catsout.wallpaperEngineKde 1.2
 import ".."
 import "../js/utils.mjs" as Utils
+import "../js/qwebchannel_src.js" as WebChannelJs
 
 Item {
     id: webItem
     anchors.fill: parent
-    property alias source: web.url
+    // bound to web.url only after the user scripts are registered (see below)
+    property url source
     property bool hasLib: background.hasLib
     property int fps: background.fps
     property var readfile
@@ -110,17 +112,19 @@ Item {
         }
 
         Component.onCompleted: {
-            userScripts.insert([
-                {
+            // One single-element list per script: on Qt 6.11 only the last
+            // element of a list passed to insert() is actually executed, and
+            // insert() does not accept a plain object.
+            userScripts.insert([{
                     injectionPoint: WebEngineScript.DocumentCreation,
                     worldId: WebEngineScript.MainWorld,
                     name: "QWebChannel",
                     // bundled copy (Qt's own, GPL-2.0): the qrc resource is not
                     // available inside plasmashell, which left every web
                     // wallpaper without properties and audio
-                    sourceUrl: Qt.resolvedUrl("../js/qwebchannel.js")
-                },
-                {
+                    sourceCode: WebChannelJs.QWEBCHANNEL_SRC
+                }]);
+            userScripts.insert([{
                     injectionPoint: WebEngineScript.DocumentCreation,
                     worldId: WebEngineScript.MainWorld,
                     name: "Audio",
@@ -133,8 +137,8 @@ Item {
                                 window.wallpaperRAed = listener;
                         }
                     `
-                },
-                {
+                }]);
+            userScripts.insert([{
                     worldId: WebEngineScript.MainWorld,
                     injectionPoint: WebEngineScript.Deferred,
                     name: "ObjectInjector",
@@ -157,8 +161,10 @@ Item {
                         });
                         document.getElementsByTagName('body')[0].ondragstart = function() { return false; }
                         `
-                }
-            ])
+                }]);
+            // Scripts must exist before navigation starts, or DocumentCreation
+            // scripts never run for the first document.
+            web.url = Qt.binding(function() { return webItem.source; });
             background.nowBackend = 'QtWebEngine';
         }
 
