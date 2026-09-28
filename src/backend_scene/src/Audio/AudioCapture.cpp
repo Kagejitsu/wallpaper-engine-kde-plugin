@@ -24,11 +24,12 @@ constexpr int    kRate        = 48000;
 constexpr int    kChannels    = 2;
 constexpr int    kFftSize     = 2048;             // ~43 ms window
 constexpr int    kRingFrames  = kFftSize * 4;
-constexpr double kMinHz       = 40.0;
-constexpr double kMaxHz       = 16000.0;
+constexpr double kMaxHz       = 14000.0;
+constexpr double kBandPower   = 1.53;             // band edges = kMaxHz * (i/64)^p: 0-24-69-128-200 Hz...
 constexpr double kRefreshSec  = 0.008;            // spectrum recompute interval
-constexpr double kAttack      = 0.55;             // per update, towards louder
-constexpr double kDecayPerSec = 9.0;              // exponential fall-off
+constexpr double kAttack      = 0.8;              // per update, towards louder
+constexpr double kDecayPerSec = 12.0;             // exponential fall-off
+constexpr float  kMaxValue    = 2.0f;             // like WE, loud bass may exceed 1
 constexpr float  kSilence     = 1e-5f;            // RMS below this = no audio
 
 double NowSec() {
@@ -60,17 +61,28 @@ void Fft(std::vector<std::complex<float>>& a) {
     }
 }
 
-// FFT bin range [lo, hi) for each of the 64 log-spaced bands
+// FFT bin range [lo, hi) for each of the 64 bands. Power-law spacing: the
+// first four bands together cover 0-200 Hz (kick and bass), so the 16-band
+// downmix's band 0 carries the beat like Wallpaper Engine's does.
 struct BandTable {
     std::array<int, kSpectrumBands + 1> edges {};
     BandTable() {
-        const double lo = std::log(kMinHz), hi = std::log(kMaxHz);
         for (int i = 0; i <= kSpectrumBands; i++) {
-            const double f = std::exp(lo + (hi - lo) * i / kSpectrumBands);
+            const double f = kMaxHz * std::pow((double)i / kSpectrumBands, kBandPower);
             edges[(size_t)i] = std::clamp((int)std::lround(f * kFftSize / kRate), 1, kFftSize / 2);
         }
     }
 };
+
+// WP_AUDIO_GAIN=<float> scales every band (default 1)
+float Gain() {
+    static const float g = [] {
+        const char* e = std::getenv("WP_AUDIO_GAIN");
+        double      v = e ? std::atof(e) : 0.0;
+        return (float)(v > 0.0 ? v : 1.0);
+    }();
+    return g;
+}
 } // namespace
 
 struct AudioCapture::Impl {
@@ -145,14 +157,16 @@ struct AudioCapture::Impl {
                            std::array<float, kSpectrumBands>&      out) {
             for (int b = 0; b < kSpectrumBands; b++) {
                 int lo = bands.edges[(size_t)b], hi = std::max(bands.edges[(size_t)b + 1], lo + 1);
-                float peak = 0.0f;
-                for (int k = lo; k < hi && k < kFftSize / 2; k++)
-                    peak = std::max(peak, std::abs(x[(size_t)k]));
-                // amplitude of a full-scale sine ≈ 1 (Hann window gain 0.5)
-                const float amp = peak * 4.0f / kFftSize;
-                // perceptual curve + gentle treble lift, like WE's bars
-                float v = std::sqrt(amp) * (1.2f + 0.8f * (float)b / kSpectrumBands);
-                v       = std::clamp(v, 0.0f, 1.0f);
+                // band energy: a tone in one bin gives its amplitude (full scale
+                // ≈ 1 with the Hann window); wide bass bands add their bins up
+                float energy = 0.0f;
+                for (int k = lo; k < hi && k < kFftSize / 2; k++) energy += std::norm(x[(size_t)k]);
+                const float amp = std::sqrt(energy) * 4.0f / kFftSize;
+                // perceptual curve + treble lift (music has far less energy up
+                // there), values above 1 allowed like WE's
+                float v = std::pow(amp * 3.0f, 0.6f) * (1.0f + 0.6f * (float)b / kSpectrumBands) *
+                          Gain();
+                v = std::clamp(v, 0.0f, kMaxValue);
                 float& cur = out[(size_t)b];
                 if (v > cur)
                     cur += (v - cur) * (float)kAttack;
