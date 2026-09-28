@@ -115,7 +115,10 @@ Item {
                     injectionPoint: WebEngineScript.DocumentCreation,
                     worldId: WebEngineScript.MainWorld,
                     name: "QWebChannel",
-                    sourceUrl: "qrc:///qtwebchannel/qwebchannel.js"
+                    // bundled copy (Qt's own, GPL-2.0): the qrc resource is not
+                    // available inside plasmashell, which left every web
+                    // wallpaper without properties and audio
+                    sourceUrl: Qt.resolvedUrl("../js/qwebchannel.js")
                 },
                 {
                     injectionPoint: WebEngineScript.DocumentCreation,
