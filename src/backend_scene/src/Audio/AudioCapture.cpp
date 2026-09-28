@@ -29,7 +29,8 @@ constexpr double kBandPower   = 1.53;             // band edges = kMaxHz * (i/64
 constexpr double kRefreshSec  = 0.008;            // spectrum recompute interval
 constexpr double kAttack      = 0.8;              // per update, towards louder
 constexpr double kDecayPerSec = 12.0;             // exponential fall-off
-constexpr float  kMaxValue    = 2.0f;             // like WE, loud bass may exceed 1
+constexpr float  kMaxValue    = 3.0f;             // like WE, loud bass may exceed 1
+constexpr float  kBaseGain    = 2.5f;             // tuned against WE by eye (Kate, 2026-09-27)
 constexpr float  kSilence     = 1e-5f;            // RMS below this = no audio
 
 double NowSec() {
@@ -74,12 +75,12 @@ struct BandTable {
     }
 };
 
-// WP_AUDIO_GAIN=<float> scales every band (default 1)
+// WP_AUDIO_GAIN=<float> multiplies the built-in gain (default 1)
 float Gain() {
     static const float g = [] {
         const char* e = std::getenv("WP_AUDIO_GAIN");
         double      v = e ? std::atof(e) : 0.0;
-        return (float)(v > 0.0 ? v : 1.0);
+        return kBaseGain * (float)(v > 0.0 ? v : 1.0);
     }();
     return g;
 }
