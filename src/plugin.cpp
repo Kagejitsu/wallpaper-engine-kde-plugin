@@ -10,6 +10,7 @@
 #include "GamemodeMonitor.hpp"
 #include "WallpaperSyncBus.hpp"
 #include "GlobalConfigStore.hpp"
+#include "AudioSpectrum.hpp"
 
 constexpr std::array<uint, 2> WPVer { 1, 2 };
 
@@ -30,6 +31,7 @@ public:
         qmlRegisterType<wekde::GamemodeMonitor>(uri, WPVer[0], WPVer[1], "GamemodeMonitor");
         qmlRegisterType<wekde::WallpaperSyncBus>(uri, WPVer[0], WPVer[1], "WallpaperSyncBus");
         qmlRegisterType<wekde::GlobalConfig>(uri, WPVer[0], WPVer[1], "GlobalConfig");
+        qmlRegisterType<wekde::AudioSpectrum>(uri, WPVer[0], WPVer[1], "AudioSpectrum");
     }
 };
 

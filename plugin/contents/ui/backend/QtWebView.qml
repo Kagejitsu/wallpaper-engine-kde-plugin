@@ -1,6 +1,7 @@
 import QtQuick 2.5
 import QtWebEngine 1.10
 import QtWebChannel 1.10
+import com.github.catsout.wallpaperEngineKde 1.2
 import ".."
 import "../js/utils.mjs" as Utils
 
@@ -32,6 +33,8 @@ Item {
         signal sigUserProperties(var properties)
         signal sigAudio(var audioArray)
         property bool loaded: false
+        // set by the page through the web channel when it registers an audio listener
+        property bool audioWanted: false
         property var userProperties 
         property var generalProperties
         onLoadedChanged: {
@@ -48,6 +51,13 @@ Item {
     WebChannel {
         id: channel
         registeredObjects: [webobj]
+    }
+    // System-audio spectrum for wallpaperRegisterAudioListener(); the capture
+    // only runs while a page asked for it and is not paused.
+    AudioSpectrum {
+        id: audioSpectrum
+        active: webobj.audioWanted && !web.paused && webobj.loaded
+        onFrame: (audioArray) => webobj.sigAudio(audioArray)
     }
 
     WebEngineView {
@@ -113,9 +123,10 @@ Item {
                     name: "Audio",
                     sourceCode: `
                         window.wallpaperRegisterAudioListener = function(listener) {
-                            if(window.wpeQml)
+                            if(window.wpeQml) {
                                 window.wpeQml.sigAudio.connect(listener);
-                            else
+                                window.wpeQml.audioWanted = true;
+                            } else
                                 window.wallpaperRAed = listener;
                         }
                     `
@@ -129,8 +140,10 @@ Item {
                             window.wpeQml = channel.objects.wpeQml;
                             const wpeQml = window.wpeQml;
                             const propertyListener = window.wallpaperPropertyListener;
-                            if(window.wallpaperRAed)
+                            if(window.wallpaperRAed) {
                                 wpeQml.sigAudio.connect(window.wallpaperRAed);
+                                wpeQml.audioWanted = true;
+                            }
                             if(propertyListener) {
                                 if(propertyListener.applyGeneralProperties)
                                     wpeQml.sigGeneralProperties.connect(propertyListener.applyGeneralProperties);

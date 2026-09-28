@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}
 	GamemodeMonitor.cpp
 	WallpaperSyncBus.cpp
 	GlobalConfigStore.cpp
+	AudioSpectrum.cpp
 	qmldir
 )
 
@@ -29,6 +30,7 @@ target_link_libraries(${PROJECT_NAME}
 	Qt::Qml 
 	mpvbackend
 	wescene-renderer-qml
+	wpAudio
 	Qt::Core
 	Qt::DBus
 )
