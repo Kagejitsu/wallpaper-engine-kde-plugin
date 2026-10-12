@@ -42,6 +42,7 @@ Rectangle {
     property bool   cacheScenePasses: wallpaper.configuration.SceneCachePasses
     property bool   shareGpuContext: wallpaper.configuration.ShareGpuContext
     property bool   mirrorScene: wallpaper.configuration.MirrorScene
+    property bool   spanScreens: effCfg("SpanScreens", wallpaper.configuration.SpanScreens)
 
     property bool   randomizeWallpaper: effCfg("RandomizeWallpaper", wallpaper.configuration.RandomizeWallpaper)
     property bool   noRandomWhilePaused: effCfg("NoRandomWhilePaused", wallpaper.configuration.NoRandomWhilePaused)
@@ -368,7 +369,24 @@ Rectangle {
     // main  
     Item { 
         id: backendLoader
-        anchors.fill: parent
+        // Spanning lays the wallpaper over the bounding box of all screens and shifts it so
+        // each screen shows its own slice. Every screen renders the full area; with Mirror
+        // Scene on, screens showing the same scene share one render since their sizes match.
+        readonly property rect _desktop: {
+            const screens = Qt.application.screens;
+            let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+            for (let i = 0; i < screens.length; i++) {
+                x0 = Math.min(x0, screens[i].virtualX);
+                y0 = Math.min(y0, screens[i].virtualY);
+                x1 = Math.max(x1, screens[i].virtualX + screens[i].width);
+                y1 = Math.max(y1, screens[i].virtualY + screens[i].height);
+            }
+            return Qt.rect(x0, y0, x1 - x0, y1 - y0);
+        }
+        x: background.spanScreens ? _desktop.x - Screen.virtualX : 0
+        y: background.spanScreens ? _desktop.y - Screen.virtualY : 0
+        width: background.spanScreens ? _desktop.width : parent.width
+        height: background.spanScreens ? _desktop.height : parent.height
         property var item: null
 
         signal loaded
@@ -468,6 +486,8 @@ Rectangle {
 
         // background signal connect
         background.videoBackendChanged.connect(loadBackend);
+        // the scene renderer picks its resolution once at startup, so a resize needs a reload
+        background.spanScreensChanged.connect(loadBackend);
         background.okChanged.connect(autoPause);
         background.sourceChanged.connect(applySource);
 
