@@ -37,8 +37,11 @@ public:
     // (topological order). cache_passes gates the whole optimization.
     bool                                  cache_passes { true };
     std::unordered_map<std::string, bool> rt_frame_static;
-    // how many passes of the current graph write each render target
-    std::unordered_map<std::string, int> rt_writer_count;
+    // Real writers per render-target name. Graph versions of one name still
+    // share a single GPU image, so a name written more than once cannot be
+    // cached: a later writer overwrites it and a skipped producer never redraws.
+    // Filled by sceneToRenderGraph; cleared at the start of each build.
+    std::unordered_map<std::string, int> rt_write_count;
 
     std::unordered_map<std::string, std::shared_ptr<SceneCamera>> cameras;
     std::unordered_map<std::string, std::vector<std::string>>     linkedCameras;
@@ -66,7 +69,10 @@ public:
 
     SceneCamera* activeCamera;
 
-    i32                  ortho[2] { 1920, 1080 }; // w, h
+    i32 ortho[2] { 1920, 1080 }; // w, h
+    // Raw scene zoom. Ortho sizing goes through ZoomedExtent; fill mode reads
+    // this so it does not replace the parsed crop with the full ortho size.
+    float                camera_zoom { 1.0f };
     std::array<float, 3> clearColor { 1.0f, 1.0f, 1.0f };
     // 0 when the bottom layer is played underneath by the host (video underlay)
     float clearAlpha { 1.0f };
