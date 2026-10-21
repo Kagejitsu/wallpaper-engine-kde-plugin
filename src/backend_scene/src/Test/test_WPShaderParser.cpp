@@ -2,6 +2,7 @@
 
 #include "ParserTestFs.hpp"
 #include "WPShaderParser.hpp"
+#include "Vulkan/Shader.hpp"
 
 using namespace wallpaper;
 
@@ -20,6 +21,60 @@ bool CompileFragment(const std::string& source) {
 } // namespace
 
 TEST_SUITE("WPShaderParser") {
+    TEST_CASE("sparse texture slots enable opacity only when a mask is supplied") {
+        for (const bool has_mask : { false, true }) {
+            INFO("mask supplied: " << has_mask);
+            fs::VFS                            vfs;
+            WPShaderInfo                       info;
+            const std::vector<WPShaderTexInfo> textures { { true }, { has_mask }, { true } };
+            const auto                         source = WPShaderParser::PreShaderSrc(vfs,
+                                                             R"(
+uniform sampler2D g_Texture0;
+uniform sampler2D g_Texture1; // {"combo":"OPACITY"}
+uniform sampler2D g_Texture2;
+void main() {
+    vec4 color = texSample2D(g_Texture0, vec2(0.0)) + texSample2D(g_Texture2, vec2(0.0));
+#if OPACITY
+    color *= texSample2D(g_Texture1, vec2(0.0));
+#endif
+    gl_FragColor = color;
+}
+)",
+                                                             &info,
+                                                             textures);
+            CHECK(info.combos.at("OPACITY") == (has_mask ? "1" : "0"));
+            WPShaderParser::InitGlslang();
+            std::array<WPShaderUnit, 1> units { WPShaderUnit { ShaderType::FRAGMENT, source, {} } };
+            std::vector<ShaderCode>     codes;
+            const bool                  compiled =
+                WPShaderParser::CompileToSpv("test", units, codes, vfs, &info, textures);
+            CHECK(compiled);
+            if (compiled) {
+                std::vector<vulkan::Uni_ShaderSpv> shaders;
+                vulkan::ShaderReflected            reflected;
+                const bool reflected_ok = vulkan::GenReflect(codes, shaders, reflected);
+                CHECK(reflected_ok);
+                if (reflected_ok) {
+                    CHECK(reflected.binding_map.count("g_Texture0") == 1);
+                    CHECK(reflected.binding_map.count("g_Texture2") == 1);
+                    CHECK(reflected.binding_map.count("g_Texture1") == (has_mask ? 1 : 0));
+                }
+            }
+            WPShaderParser::FinalGlslang();
+        }
+    }
+
+    TEST_CASE("texture combos outside the supplied slot range stay disabled") {
+        fs::VFS      vfs;
+        WPShaderInfo info;
+        WPShaderParser::PreShaderSrc(
+            vfs,
+            "uniform sampler2D g_Texture3; // {\"combo\":\"MASK\"}\nvoid main() {}",
+            &info,
+            { { true }, { false }, { true } });
+        CHECK(info.combos.at("MASK") == "0");
+    }
+
     TEST_CASE("HLSL math overloads and scalar vector declarators compile") {
         CHECK(CompileFragment(R"(
 void main() {

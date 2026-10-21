@@ -586,7 +586,7 @@ void CustomShaderPass::destory(const Device&, RenderingResources& rr) {
             buf->unallocateSubRef(bufref);
         }
     }
-    rr.dyn_buf->unallocateSubRef(m_desc.ubo_buf);
+    if (m_desc.ubo_buf) rr.dyn_buf->unallocateSubRef(m_desc.ubo_buf);
 }
 
 void CustomShaderPass::setDescTex(u32 index, std::string_view tex_key) {

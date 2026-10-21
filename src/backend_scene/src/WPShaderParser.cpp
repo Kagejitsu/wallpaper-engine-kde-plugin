@@ -166,13 +166,11 @@ inline void ParseWPShader(const std::string& src, WPShaderInfo* pWPShaderInfo,
                         i32 index { 0 };
                         STRTONUM(name.substr(9), index);
                         if (! wput.default_.empty()) defTexs.push_back({ index, wput.default_ });
-                        if (! wput.combo.empty()) {
-                            if (index >= texcount)
-                                combos[wput.combo] = "0";
-                            else
-                                combos[wput.combo] = "1";
-                        }
-                        if (index < texcount && texinfos[(usize)index].enabled) {
+                        // Effect inputs can have empty slots between bound textures.
+                        const bool enabled =
+                            index >= 0 && index < texcount && texinfos[(usize)index].enabled;
+                        if (! wput.combo.empty()) combos[wput.combo] = enabled ? "1" : "0";
+                        if (enabled) {
                             auto& compos = texinfos[(usize)index].composEnabled;
 
                             usize num = std::min(std::size(compos), std::size(wput.components));
