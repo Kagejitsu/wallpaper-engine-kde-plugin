@@ -7,22 +7,18 @@ on:
 
 jobs:
   unit-tests:
-    name: Native and QML unit tests
+    name: Native helper tests (Qt6 only)
     runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
-        # No submodules needed for the native helpers and QML tests.
+        # Keep Qt Core/Test compatibility on Ubuntu's older Qt.
+        # Supported Qt 6.7+ QML is tested by both full-build jobs.
 
       - name: Install Qt6
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev qt6-declarative-dev \
-            qml6-module-qttest qml6-module-qtquick qml6-module-qtquick-window \
-            qml6-module-qtquick-controls qml6-module-qtquick-layouts \
-            qml6-module-qtquick-templates \
-            qml6-module-qtqml-models qml6-module-qtqml-workerscript \
-            qml6-module-qt-labs-folderlistmodel cmake ninja-build
+          sudo apt-get install -y qt6-base-dev cmake ninja-build
 
       - name: Configure (standalone test build)
         # Build the tests/ directory directly — avoids the KDE/Plasma/mpv/Vulkan
@@ -36,6 +32,4 @@ jobs:
         run: cmake --build build/tests
 
       - name: Run tests
-        run: |
-          ctest --test-dir build/tests --output-on-failure -V
-          ctest --test-dir build/tests -R qml_tests --no-tests=error --output-on-failure
+        run: ctest --test-dir build/tests --output-on-failure -V

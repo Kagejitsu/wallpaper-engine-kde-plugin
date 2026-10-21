@@ -33,6 +33,7 @@ jobs:
             ninja \
             extra-cmake-modules \
             libplasma \
+            kirigami \
             qt6-declarative \
             qt6-webchannel \
             vulkan-headers \
@@ -94,6 +95,7 @@ jobs:
             mpv-libs-devel \
             qt6-qtbase-private-devel \
             libplasma-devel \
+            kf6-kirigami \
             qt6-qtwebchannel-devel \
             qt6-qtdeclarative-devel
 

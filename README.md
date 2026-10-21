@@ -92,7 +92,8 @@ systemctl --user restart plasma-plasmashell.service
 
 To run native, scene parser, shader compiler and QML tests, configure with
 `-DBUILD_TESTS=ON`, build, then run `ctest --test-dir build --output-on-failure`.
-QML tests additionally need Qt Quick Test and the Quick Controls/Layouts runtime modules.
+QML tests additionally need Qt 6.7+ Quick Test, Quick Controls/Layouts and Kirigami
+runtime modules.
 
 #### Build RPM package (Fedora)
 
