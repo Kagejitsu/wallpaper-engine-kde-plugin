@@ -8,20 +8,19 @@ WallpaperItem {
 Rectangle {
     id: background
     anchors.fill: parent
+    clip: true
     color: wallpaper.configuration.BackgroundColor
     
     // Steam libraries found on this machine, see FileHelper::detectSteam
     property var steamDetect: pyext.detect_steam(wallpaper.configuration.SteamLibraryPath)
     property string steamlibrary: {
-        // Qt.resolvedUrl('') gives this file's own url, so fall back on the
-        // native path and resolve only once there is one.
         const path = wallpaper.configuration.SteamLibraryPath || steamDetect.library;
-        return path ? Qt.resolvedUrl(path).toString() : '';
+        return Common.localFileUrl(path);
     }
     // SceneBackend reads assets as a QUrl and QUrl::toLocalFile() is empty for
     // a scheme-less one, so the detected native path has to be resolved too.
     property string steamAssets: steamDetect.assets
-        ? Qt.resolvedUrl(steamDetect.assets).toString()
+        ? Common.localFileUrl(steamDetect.assets)
         : Common.getAssetsPath(steamlibrary)
     // Global Mode: shared config (wallpaper choice + randomization) lives in
     // ~/.config/wekde/global.json instead of per-screen KConfig. globalRev is
@@ -42,6 +41,7 @@ Rectangle {
     property bool   cacheScenePasses: wallpaper.configuration.SceneCachePasses
     property bool   shareGpuContext: wallpaper.configuration.ShareGpuContext
     property bool   mirrorScene: wallpaper.configuration.MirrorScene
+    property bool   spanScreens: effCfg("SpanScreens", wallpaper.configuration.SpanScreens)
 
     property bool   randomizeWallpaper: effCfg("RandomizeWallpaper", wallpaper.configuration.RandomizeWallpaper)
     property bool   noRandomWhilePaused: effCfg("NoRandomWhilePaused", wallpaper.configuration.NoRandomWhilePaused)
@@ -368,8 +368,26 @@ Rectangle {
     // main  
     Item { 
         id: backendLoader
-        anchors.fill: parent
+        // Qt screen geometry and item geometry both use device-independent pixels.
+        readonly property rect desktop: Common.desktopGeometry(Qt.application.screens)
+        readonly property bool spanning: background.spanScreens && desktop.width > 0 && desktop.height > 0
+        x: spanning ? desktop.x - Screen.virtualX : 0
+        y: spanning ? desktop.y - Screen.virtualY : 0
+        width: spanning ? desktop.width : parent.width
+        height: spanning ? desktop.height : parent.height
         property var item: null
+
+        // Scene framebuffers take their size at creation; wait for geometry to settle.
+        onWidthChanged: sceneResizeTimer.restart()
+        onHeightChanged: sceneResizeTimer.restart()
+        Timer {
+            id: sceneResizeTimer
+            interval: 100
+            onTriggered: {
+                if(backendLoader.item && background.wallpaperType === 'scene')
+                    background.loadBackend();
+            }
+        }
 
         signal loaded
 

@@ -8,20 +8,31 @@
 #include "SpecTexs.hpp"
 #include "wpscene/WPMaterial.h"
 #include "WPShaderParser.hpp"
+#include <optional>
+#include <cmath>
 
 using namespace wallpaper;
 
 namespace
 {
+struct TruncatedMdl {};
 
-WPPuppet::PlayMode ToPlayMode(std::string_view m) {
+class MdlStream : public fs::MemBinaryStream {
+public:
+    using fs::MemBinaryStream::MemBinaryStream;
+    usize Read(void* buffer, usize size) override {
+        if (size > (usize)(Size() - Tell())) throw TruncatedMdl {};
+        return fs::MemBinaryStream::Read(buffer, size);
+    }
+};
+
+std::optional<WPPuppet::PlayMode> ToPlayMode(std::string_view m) {
     if (m == "loop" || m.empty()) return WPPuppet::PlayMode::Loop;
     if (m == "mirror") return WPPuppet::PlayMode::Mirror;
     if (m == "single") return WPPuppet::PlayMode::Single;
 
     LOG_ERROR("unknown puppet animation play mode \"%s\"", m.data());
-    assert(m == "loop");
-    return WPPuppet::PlayMode::Loop;
+    return std::nullopt;
 }
 } // namespace
 
@@ -39,14 +50,18 @@ constexpr uint32_t alt_format_vertex_size_herald_value = 0x0180000F;
 
 constexpr uint32_t singile_bone_frame = 4 * 9;
 
-bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
+bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) try {
     auto str_path = std::string(path);
     auto pfile    = vfs.Open("/assets/" + str_path);
     if (! pfile) return false;
-    auto  memfile = fs::MemBinaryStream(*pfile);
-    auto& f       = memfile;
+    auto  memfile   = MdlStream(*pfile);
+    auto& f         = memfile;
+    auto  remaining = [&f]() -> u64 {
+        return (u64)(f.Size() - f.Tell());
+    };
 
     mdl.mdlv = ReadMDLVesion(f);
+    if (mdl.mdlv <= 0) return false;
 
     int32_t mdl_flag = f.ReadInt32();
     if (mdl_flag == 9) {
@@ -69,6 +84,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     if (curr == 0) {
         alt_mdl_format = true;
         while (curr != alt_format_vertex_size_herald_value) {
+            if (remaining() < 4) {
+                LOG_ERROR("mdl '%s': vertex size herald not found", str_path.c_str());
+                return false;
+            }
             curr = f.ReadUint32();
         }
         curr = f.ReadUint32();
@@ -77,6 +96,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     }
 
     uint32_t vertex_size = curr;
+    if (vertex_size > remaining()) {
+        LOG_ERROR("mdl '%s': vertex size %u exceeds file", str_path.c_str(), vertex_size);
+        return false;
+    }
     if (vertex_size % (alt_mdl_format ? alt_singile_vertex : singile_vertex) != 0) {
         LOG_ERROR("unsupport mdl vertex size %d", vertex_size);
         return false;
@@ -97,6 +120,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     }
 
     uint32_t indices_size = f.ReadUint32();
+    if (indices_size > remaining()) {
+        LOG_ERROR("mdl '%s': indices size %u exceeds file", str_path.c_str(), indices_size);
+        return false;
+    }
     if (indices_size % singile_indices != 0) {
         LOG_ERROR("unsupport mdl indices size %d", indices_size);
         return false;
@@ -114,7 +141,7 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     {
         char ring[4] = { 0, 0, 0, 0 };
         char c;
-        while (f.Read(&c, 1) == 1) {
+        while (remaining() > 0 && f.Read(&c, 1) == 1) {
             ring[0] = ring[1];
             ring[1] = ring[2];
             ring[2] = ring[3];
@@ -142,6 +169,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     auto& bones = mdl.puppet->bones;
     auto& anims = mdl.puppet->anims;
 
+    if ((u64)bones_num * 78 > remaining()) {
+        LOG_ERROR("mdl '%s': bone count %u exceeds file", str_path.c_str(), bones_num);
+        return false;
+    }
     bones.resize(bones_num);
     for (uint i = 0; i < bones_num; i++) {
         auto&       bone = bones[i];
@@ -182,6 +213,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                 for (uint j = 0; j < 16; j++) f.ReadFloat(); // mat
         }
         uint32_t size_unk = f.ReadUint32();
+        if ((u64)size_unk * 12 > remaining()) {
+            LOG_ERROR("mdl '%s': bad section count %u", str_path.c_str(), size_unk);
+            return false;
+        }
         for (uint i = 0; i < size_unk; i++)
             for (int j = 0; j < 3; j++) f.ReadUint32();
 
@@ -209,6 +244,9 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     std::string mdVersion;
 
     do {
+        // A model without an MDLA (animation) section just ends here; reads past
+        // EOF return "" forever, so stop instead of spinning on the loader thread.
+        if (remaining() == 0) break;
         std::string mdPrefix = f.ReadStr();
 
         // sometimes there can be other garbage in this gap, so we need to
@@ -235,17 +273,26 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     } while (mdType != "MDLA");
 
     if (mdType == "MDLA" && mdVersion.length() > 0) {
-        mdl.mdla = std::stoi(mdVersion);
+        auto [end, error] =
+            std::from_chars(mdVersion.data(), mdVersion.data() + mdVersion.size(), mdl.mdla);
+        if (error != std::errc() || end != mdVersion.data() + mdVersion.size()) {
+            LOG_ERROR("mdl '%s': invalid animation version", str_path.c_str());
+            return false;
+        }
         if (mdl.mdla != 0) {
             uint end_size = f.ReadUint32();
             (void)end_size;
 
             uint anim_num = f.ReadUint32();
+            if ((u64)anim_num * 26 > remaining()) {
+                LOG_ERROR("mdl '%s': bad animation count %u", str_path.c_str(), anim_num);
+                return false;
+            }
             anims.resize(anim_num);
             for (auto& anim : anims) {
                 // there can be a variable number of 32-bit 0s between animations
                 anim.id = 0;
-                while (anim.id == 0) {
+                while (anim.id == 0 && remaining() >= 4) {
                     anim.id = f.ReadInt32();
                 }
 
@@ -258,18 +305,29 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                 if (anim.name.empty()) {
                     anim.name = f.ReadStr();
                 }
-                anim.mode   = ToPlayMode(f.ReadStr());
+                const auto mode = ToPlayMode(f.ReadStr());
+                if (! mode) return false;
+                anim.mode   = *mode;
                 anim.fps    = f.ReadFloat();
                 anim.length = f.ReadInt32();
+                if (anim.length <= 0 || ! std::isfinite(anim.fps) || anim.fps <= 0.0) {
+                    LOG_ERROR("mdl '%s': invalid animation timing", str_path.c_str());
+                    return false;
+                }
                 f.ReadInt32();
 
                 uint32_t b_num = f.ReadUint32();
+                if ((u64)b_num * 8 > remaining()) {
+                    LOG_ERROR("mdl '%s': bad bone track count %u", str_path.c_str(), b_num);
+                    return false;
+                }
                 anim.bframes_array.resize(b_num);
                 for (auto& bframes : anim.bframes_array) {
                     f.ReadInt32();
                     uint32_t byte_size = f.ReadUint32();
                     uint32_t num       = byte_size / singile_bone_frame;
-                    if (byte_size % singile_bone_frame != 0) {
+                    if (byte_size > remaining() || byte_size % singile_bone_frame != 0 ||
+                        num < (uint32_t)anim.length) {
                         LOG_ERROR("wrong bone frame size %d", byte_size);
                         return false;
                     }
@@ -295,6 +353,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
                     f.ReadUint8();
                 } else {
                     uint32_t unk_extra_uint = f.ReadUint32();
+                    if ((u64)unk_extra_uint * 5 > remaining()) {
+                        LOG_ERROR("mdl '%s': bad extra count %u", str_path.c_str(), unk_extra_uint);
+                        return false;
+                    }
                     for (uint i = 0; i < unk_extra_uint; i++) {
                         f.ReadFloat();
                         // data is like: {"$$hashKey":"object:2110","frame":1,"name":"random_anim"}
@@ -314,6 +376,9 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
              mdl.puppet->bones.size(),
              mdl.puppet->anims.size());
     return true;
+} catch (const TruncatedMdl&) {
+    LOG_ERROR("mdl '%.*s': truncated data", (int)path.size(), path.data());
+    return false;
 }
 
 void WPMdlParser::GenPuppetMesh(SceneMesh& mesh, const WPMdl& mdl) {

@@ -49,16 +49,19 @@ void RecordCopyBuffer(const BufferParameters& dst_buf, const BufferParameters& s
     VkBufferMemoryBarrier in_bar {
         .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
         .pNext         = nullptr,
-        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT,
-        .buffer        = dst_buf.handle,
-        .offset        = 0,
-        .size          = VK_WHOLE_SIZE,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                         VK_ACCESS_UNIFORM_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer              = dst_buf.handle,
+        .offset              = 0,
+        .size                = VK_WHOLE_SIZE,
     };
     cmd.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        VK_DEPENDENCY_BY_REGION_BIT,
+                        0,
                         in_bar);
 }
 } // namespace

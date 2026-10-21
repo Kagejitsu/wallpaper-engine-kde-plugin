@@ -5,6 +5,7 @@ A wallpaper plugin integrating [Wallpaper Engine](https://store.steampowered.com
 - **Native file operations** — C++, no Python
 - **KDE 6.5+ theme reactivity** — UI stays visible when switching between light and dark themes
 - **Plasma 6 / Qt 6**
+- **Span Across Screens** — show each screen's part of one desktop-sized wallpaper
 
 ## Hyprland and Omarchy
 
@@ -89,6 +90,10 @@ sudo cmake --install build
 systemctl --user restart plasma-plasmashell.service
 ```
 
+To run native, scene parser, shader compiler and QML tests, configure with
+`-DBUILD_TESTS=ON`, build, then run `ctest --test-dir build --output-on-failure`.
+QML tests additionally need Qt Quick Test and the Quick Controls/Layouts runtime modules.
+
 #### Build RPM package (Fedora)
 
 Useful for rpm-ostree/Bazzite systems where layered packages survive updates.
@@ -135,6 +140,11 @@ The Steam library is detected automatically, including Flatpak and Snap installs
 other drives. Wallpapers from every library are listed together. Use the folder button on the
 Wallpapers tab to override the detected library, for example to pick a second Steam installation.
 
+Enable **Span Across Screens** under Display to lay out a wallpaper over the bounding rectangle
+of all screens. Use **Same wallpaper on all screens** and the same Display mode for a continuous
+image. Each backend uses the full desktop size; compatible scenes can share rendering with
+**Mirror Scene**. The option is off by default.
+
 > **Note:** After an rpm-ostree/Bazzite install you may need to reboot before the plugin starts working. For cmake installs, restarting plasmashell is enough: `systemctl --user restart plasma-plasmashell.service`
 
 If the list stays empty and you copied the plugin into
@@ -177,6 +187,10 @@ Basic web APIs supported. WebGL may not work properly.
 ### Video
 - **QtMultimedia** (default) — uses GStreamer
 - **MPV** — requires plugin lib compilation
+
+Video embedded in a scene's `.tex` file is not played yet. Such textures use a transparent
+placeholder instead of uploading compressed video bytes to the GPU; the other scene layers
+can still render. Ordinary video wallpapers are unaffected.
 
 ## Acknowledgments
 - [RePKG](https://github.com/notscuffed/repkg)

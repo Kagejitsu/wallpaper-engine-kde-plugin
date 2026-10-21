@@ -3,6 +3,7 @@
 #include "Vulkan/StagingBuffer.hpp"
 #include "Vulkan/TextureCache.hpp"
 #include <memory>
+#include <vector>
 
 namespace wallpaper
 {
@@ -12,9 +13,9 @@ namespace vulkan
 struct RenderingResources {
     vvk::CommandBuffer command;
 
-    vvk::Semaphore sem_swap_wait_image;
-    vvk::Semaphore sem_swap_finish;
-    vvk::Fence     fence_frame;
+    vvk::Semaphore              sem_swap_wait_image;
+    std::vector<vvk::Semaphore> sem_swap_finish;
+    vvk::Fence                  fence_frame;
 
     StagingBuffer* vertex_buf;
     StagingBuffer* dyn_buf;

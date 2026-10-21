@@ -590,6 +590,9 @@ void MainHandler::loadScene() {
     std::string pkgDir   = pkgPath_fs.parent_path().native();
     std::string scene_id = pkgPath_fs.parent_path().filename().native();
 
+    // Workshop metadata lives beside scene.pkg, outside its asset namespace.
+    vfs.Mount("/project", fs::CreatePhysicalFs(pkgDir));
+
     // load pkgfile
     if (! vfs.Mount("/assets", fs::WPPkgFs::CreatePkgFs(pkgPath))) {
         LOG_INFO("load pkg file %s failed, fallback to use dir", pkgPath.c_str());
