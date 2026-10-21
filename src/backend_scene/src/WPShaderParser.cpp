@@ -241,6 +241,23 @@ inline usize FindIncludeInsertPos(const std::string& src, usize startPos) {
         if (afterPos != std::string::npos) {
             afterPos = nextLinePos(src, afterPos + 1);
         }
+        // "struct Name {" puts the next line inside the struct body; move past the
+        // closing brace so the include doesn't land between the struct's members
+        if (afterPos != std::string::npos && afterPos != 0) {
+            int depth = 0;
+            for (usize i = 0; i < afterPos && i < src.size(); i++) {
+                if (src[i] == '{')
+                    depth++;
+                else if (src[i] == '}')
+                    depth--;
+            }
+            for (usize i = afterPos; depth > 0 && i < src.size(); i++) {
+                if (src[i] == '{')
+                    depth++;
+                else if (src[i] == '}' && --depth == 0)
+                    afterPos = nextLinePos(src, i);
+            }
+        }
         pos = std::min({ NposToZero(afterPos), mainPos });
     }
     {
@@ -475,6 +492,28 @@ inline std::string FixImplicitConversions(const std::string& src) {
         fixTrunc(vec2_vars, vec3_vars, "xy");
         fixTrunc(vec2_vars, vec4_vars, "xy");
         fixTrunc(vec3_vars, vec4_vars, "xyz");
+
+        // "v3 - vec2(x)" (or CAST2(x), which expands to "(vec2(x))"): HLSL truncates
+        // the wider left operand to match. ".xy" is an identity if the name is also
+        // declared as a vec2 in another scope; names also declared as float are skipped.
+        const auto float_vars      = collect("float");
+        auto       fixTruncOperand = [&result, &float_vars](const std::set<std::string>& src) {
+            for (const auto& s : src) {
+                if (float_vars.count(s)) continue;
+                std::regex re("\\b(" + s + R"()(\s*[-+*/]\s*\(*\s*vec2\s*\())");
+                result = std::regex_replace(result, re, "$1.xy$2");
+            }
+        };
+        fixTruncOperand(vec3_vars);
+        fixTruncOperand(vec4_vars);
+    }
+
+    // Fix: "vec3 VAR = texture(...);" — texture() returns vec4, HLSL truncates
+    // silently. Wrap the initialiser in the declared type's constructor, which
+    // truncates a vec4 and is an identity for an initialiser that already fits.
+    {
+        std::regex re(R"(\b(vec[23])(\s+\w+\s*=\s*)(texture(Lod)?\s*\([^;]*\))\s*;)");
+        result = std::regex_replace(result, re, "$1$2$1($3);");
     }
 
     // Fix: HLSL pow(scalar, vecN) broadcasts the scalar; GLSL requires matching genType.
