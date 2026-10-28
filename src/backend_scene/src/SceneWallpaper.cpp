@@ -154,6 +154,7 @@ public:
         CMD_SET_SCENE,
         CMD_SET_FILLMODE,
         CMD_SET_SPEED,
+        CMD_SCREENSHOT,
         CMD_STOP,
         CMD_DRAW,
         CMD_NO
@@ -177,6 +178,7 @@ public:
                 CASE_CMD(SET_FILLMODE);
                 CASE_CMD(SET_SCENE);
                 CASE_CMD(SET_SPEED);
+                CASE_CMD(SCREENSHOT);
                 CASE_CMD(INIT_VULKAN);
             default: break;
             }
@@ -333,6 +335,20 @@ private:
             m_speed = v;
             onMirrorKeyChanged();
         }
+    }
+    MHANDLER_CMD(SCREENSHOT) {
+        std::shared_ptr<ScreenshotRequest> req;
+        if (! msg->findObject("value", &req) || ! req) return;
+        auto done = req->done;
+        if (req->path.empty()) {
+            if (done) done(false, "empty screenshot path");
+            return;
+        }
+        if (! m_render->inited()) {
+            if (done) done(false, "renderer is not initialised");
+            return;
+        }
+        m_render->requestScreenshot(req->path, std::move(done));
     }
     MHANDLER_CMD(INIT_VULKAN) {
         std::shared_ptr<RenderInitInfo> info;
@@ -512,6 +528,13 @@ MHANDLER_CMD_IMPL(MainHandler, SET_PROPERTY) {
             if (msg->findFloat("value", &speed)) {
                 auto nmsg = CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_SET_SPEED);
                 nmsg->setFloat("value", speed);
+                nmsg->post();
+            }
+        } else if (property == PROPERTY_SCREENSHOT) {
+            std::shared_ptr<ScreenshotRequest> req;
+            if (msg->findObject("value", &req) && req) {
+                auto nmsg = CreateMsgWithCmd(m_render_handler, RenderHandler::CMD::CMD_SCREENSHOT);
+                nmsg->setObject("value", req);
                 nmsg->post();
             }
         } else if (property == PROPERTY_USER_PROPS) {

@@ -4,16 +4,17 @@
 #include <argparse/argparse.hpp>
 #include <string_view>
 
-constexpr std::string_view ARG_ASSETS      = "<assets>";
-constexpr std::string_view ARG_SCENE       = "<scene>";
-constexpr std::string_view OPT_VALID_LAYER = "--valid-layer";
-constexpr std::string_view OPT_GRAPHVIZ    = "--graphviz";
-constexpr std::string_view OPT_FPS         = "--fps";
-constexpr std::string_view OPT_RESOLUTION  = "--resolution";
-constexpr std::string_view OPT_CURSOR      = "--cursor";
-constexpr std::string_view OPT_SCREENSHOT  = "--screenshot";
-constexpr std::string_view OPT_SHOT_DELAY  = "--shot-delay";
-constexpr std::string_view OPT_CACHE_PATH  = "--cache-path";
+constexpr std::string_view ARG_ASSETS       = "<assets>";
+constexpr std::string_view ARG_SCENE        = "<scene>";
+constexpr std::string_view OPT_VALID_LAYER  = "--valid-layer";
+constexpr std::string_view OPT_GRAPHVIZ     = "--graphviz";
+constexpr std::string_view OPT_FPS          = "--fps";
+constexpr std::string_view OPT_RESOLUTION   = "--resolution";
+constexpr std::string_view OPT_CURSOR       = "--cursor";
+constexpr std::string_view OPT_SCREENSHOT   = "--screenshot";
+constexpr std::string_view OPT_SHOT_DELAY   = "--shot-delay";
+constexpr std::string_view OPT_SHOT_TIMEOUT = "--shot-timeout";
+constexpr std::string_view OPT_CACHE_PATH   = "--cache-path";
 
 struct Resolution {
     uint w;
@@ -80,12 +81,17 @@ void setAndParseArg(argparse::ArgumentParser& arg, int argc, char** argv) {
 
     // headless verification: dump one frame to a PPM file after a delay and exit
     arg.add_argument("-S", OPT_SCREENSHOT)
-        .help("Write a frame to this .ppm file and exit")
+        .help("Write one frame to this .ppm file and exit (0 written, 1 failed, 2 timed out)")
         .default_value(std::string(""))
         .nargs(1);
     arg.add_argument(OPT_SHOT_DELAY)
         .help("Seconds to wait before taking the screenshot")
         .default_value(3.0)
+        .scan<'g', double>()
+        .nargs(1);
+    arg.add_argument(OPT_SHOT_TIMEOUT)
+        .help("Seconds to wait for the screenshot after requesting it; exit code 2 on timeout")
+        .default_value(20.0)
         .scan<'g', double>()
         .nargs(1);
 

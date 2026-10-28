@@ -13,6 +13,7 @@ add_executable(backend_scene_tests
     test_PassCache.cpp
     test_OrthoCamera.cpp
     test_helpers.cpp
+    test_PpmWriter.cpp
     # Compile specific source files to avoid pulling in Vulkan
     ${SRC_DIR}/WPTexImageParser.cpp
     ${SRC_DIR}/Type.cpp

@@ -6,6 +6,7 @@
 #include "Interface/IShaderValueUpdater.h"
 
 #include "Utils/Algorism.h"
+#include "Utils/PpmWriter.hpp"
 #include "OrthoCamera.hpp"
 
 #include <cstdlib>
@@ -29,8 +30,10 @@
 #include <vector>
 #include <cstdint>
 #include <atomic>
-#include <fstream>
+#include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
 
 #if ENABLE_RENDERDOC_API
 #    include "RenderDoc.h"
@@ -122,10 +125,27 @@ struct VulkanRender::Impl {
     bool m_inited { false };
     bool m_pass_loaded { false };
 
-    // pending frame dump (see requestScreenshot)
-    std::mutex  m_shot_mtx;
-    std::string m_shot_path;
-    void readbackToFile(const ImageParameters& image, VkFormat format, const std::string& path);
+    // Pending frame dump (see requestScreenshot). Served by the next swapchain
+    // frame; `done` is always invoked exactly once.
+    struct ShotRequest {
+        std::string                                             path;
+        std::function<void(bool ok, const std::string& detail)> done;
+    };
+    // Host-visible copy of one presented image, filled inside the frame's own
+    // command buffer.
+    struct ShotReadback {
+        VmaBufferParameters buf;
+        VkExtent2D          extent {};
+        utils::PixelOrder   order { utils::PixelOrder::RGBA };
+    };
+    std::mutex                 m_shot_mtx;
+    std::optional<ShotRequest> m_shot;
+
+    std::optional<ShotRequest> takeShot();
+    static void                finishShot(ShotRequest&, bool ok, const std::string& detail);
+    std::string                prepareReadback(const ImageParameters& image, ShotReadback& rb);
+    void recordReadback(vvk::CommandBuffer& cmd, const ImageParameters& image, ShotReadback& rb);
+    std::string writeReadback(ShotReadback& rb, const std::string& path);
 
     VkImageTiling                      m_ex_tiling { VK_IMAGE_TILING_OPTIMAL };
     std::shared_ptr<VulkanExSwapchain> m_ex_swapchain;
@@ -153,9 +173,15 @@ bool VulkanRender::init(RenderInitInfo info) { return pImpl->init(info); }
 void VulkanRender::destroy() { pImpl->destroy(); }
 void VulkanRender::drawFrame(Scene& scene) { pImpl->drawFrame(scene); };
 
-void VulkanRender::requestScreenshot(std::string path) {
-    std::lock_guard<std::mutex> lk(pImpl->m_shot_mtx);
-    pImpl->m_shot_path = std::move(path);
+void VulkanRender::requestScreenshot(std::string                                   path,
+                                     std::function<void(bool, const std::string&)> done) {
+    std::optional<Impl::ShotRequest> replaced;
+    {
+        std::lock_guard<std::mutex> lk(pImpl->m_shot_mtx);
+        replaced.swap(pImpl->m_shot);
+        pImpl->m_shot = Impl::ShotRequest { std::move(path), std::move(done) };
+    }
+    if (replaced) Impl::finishShot(*replaced, false, "superseded by a newer screenshot request");
 }
 void VulkanRender::clearLastRenderGraph() { pImpl->clearLastRenderGraph(); };
 void VulkanRender::compileRenderGraph(Scene& scene, rg::RenderGraph& rg) {
@@ -221,6 +247,7 @@ bool VulkanRender::Impl::init(RenderInitInfo info) {
         .offscreen          = info.offscreen,
         .share_enabled      = info.share_gpu,
         .enable_valid_layer = info.enable_valid_layer,
+        .swapchain_readback = info.enable_readback && ! info.offscreen,
     };
     if (! info.offscreen) ci.create_surface = info.surface_info.createSurfaceOp;
 
@@ -306,6 +333,8 @@ bool VulkanRender::Impl::initRes() {
 }
 
 void VulkanRender::Impl::destroy() {
+    if (auto shot = takeShot())
+        finishShot(*shot, false, "renderer destroyed before the next frame");
     if (! m_inited) return;
 
     // Finalize glslang (paired with InitializeProcess in init)
@@ -397,6 +426,10 @@ void VulkanRender::Impl::drawFrame(Scene& scene) {
 #endif
 
     if (instance().offscreen()) {
+        if (auto shot = takeShot())
+            finishShot(*shot,
+                       false,
+                       "frame readback is only available when rendering to a window swapchain");
         drawFrameOffscreen();
     } else {
         drawFrameSwapchain();
@@ -426,6 +459,28 @@ void VulkanRender::Impl::drawFrameSwapchain() {
 
     m_finpass->setPresent(image);
 
+    // A pending screenshot is served by this frame. The guard answers the caller
+    // if any of the checked Vulkan calls below bails out early, and first waits
+    // for the device so the readback buffer (destroyed right after the guard) is
+    // never freed while a submitted copy may still be writing it.
+    std::optional<ShotRequest> shot = takeShot();
+    ShotReadback               readback;
+    if (shot) {
+        if (auto err = prepareReadback(image, readback); ! err.empty()) {
+            finishShot(*shot, false, err);
+            shot.reset();
+        }
+    }
+    struct ShotGuard {
+        std::optional<ShotRequest>& shot;
+        const vvk::Device&          dev;
+        ~ShotGuard() {
+            if (! shot) return;
+            (void)dev.WaitIdle();
+            finishShot(*shot, false, "frame submission failed");
+        }
+    } shot_guard { shot, device().handle() };
+
     (void)rr.command.Begin(VkCommandBufferBeginInfo {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .pNext = nullptr,
@@ -437,6 +492,7 @@ void VulkanRender::Impl::drawFrameSwapchain() {
             p->execute(device(), rr);
         }
     }
+    if (shot) recordReadback(rr.command, image, readback);
     (void)rr.command.End();
 
     VkPipelineStageFlags wait_dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -461,62 +517,80 @@ void VulkanRender::Impl::drawFrameSwapchain() {
         .pSwapchains        = device().swapchain().handle().address(),
         .pImageIndices      = &image_index,
     };
-    std::string shot_path;
     {
-        std::lock_guard<std::mutex> lk(m_shot_mtx);
-        shot_path.swap(m_shot_path);
-    }
-    if (shot_path.empty()) {
         std::lock_guard<std::mutex> lk(device().queue_mutex());
         VVK_CHECK_VOID_RE(device().present_queue().handle.Submit(sub_info, *rr.fence_frame));
         VVK_CHECK_VOID_RE(device().present_queue().handle.Present(present_info));
-    } else {
-        // Read the finished frame back while the image is still acquired, then
-        // present it as usual (the present semaphore is already signalled).
-        {
-            std::lock_guard<std::mutex> lk(device().queue_mutex());
-            VVK_CHECK_VOID_RE(device().present_queue().handle.Submit(sub_info, *rr.fence_frame));
-        }
-        VVK_CHECK_VOID_RE(rr.fence_frame.Wait(vk_wait_time));
-        VVK_CHECK_VOID_RE(rr.fence_frame.Reset());
-        readbackToFile(image, device().swapchain().format(), shot_path);
-        {
-            std::lock_guard<std::mutex> lk(device().queue_mutex());
-            VVK_CHECK_VOID_RE(device().present_queue().handle.Present(present_info));
-        }
-        return;
     }
 
     VVK_CHECK_VOID_RE(rr.fence_frame.Wait(vk_wait_time));
     VVK_CHECK_VOID_RE(rr.fence_frame.Reset());
+
+    if (shot) {
+        const std::string err = writeReadback(readback, shot->path);
+        finishShot(*shot, err.empty(), err.empty() ? shot->path : err);
+        shot.reset();
+    }
 }
 
-// Copy a presentable image into a host buffer and write it as binary PPM.
-void VulkanRender::Impl::readbackToFile(const ImageParameters& image, VkFormat format,
-                                        const std::string& path) {
-    const uint32_t w = image.extent.width, h = image.extent.height;
-    const size_t   bytes = (size_t)w * h * 4;
+std::optional<VulkanRender::Impl::ShotRequest> VulkanRender::Impl::takeShot() {
+    std::lock_guard<std::mutex> lk(m_shot_mtx);
+    std::optional<ShotRequest>  shot;
+    shot.swap(m_shot);
+    return shot;
+}
 
-    VmaBufferParameters buf;
-    {
-        VkBufferCreateInfo ci {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext = nullptr,
-            .size  = bytes,
-            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        };
-        buf.req_size                     = bytes;
-        VmaAllocationCreateInfo vma_info = {};
-        vma_info.usage                   = VMA_MEMORY_USAGE_CPU_ONLY;
-        VVK_CHECK_VOID_RE(vvk::CreateBuffer(device().vma_allocator(), ci, vma_info, buf.handle));
+void VulkanRender::Impl::finishShot(ShotRequest& shot, bool ok, const std::string& detail) {
+    if (ok)
+        LOG_INFO("screenshot written: %s", detail.c_str());
+    else
+        LOG_ERROR("screenshot %s failed: %s", shot.path.c_str(), detail.c_str());
+    if (shot.done) shot.done(ok, detail);
+    shot.done = nullptr;
+}
+
+// Checks that this swapchain image can be read back and allocates the host
+// buffer for it. Returns an empty string, or the reason it cannot be done.
+std::string VulkanRender::Impl::prepareReadback(const ImageParameters& image, ShotReadback& rb) {
+    const auto& swap = device().swapchain();
+    if (! swap.supportsReadback())
+        return "swapchain images are not readable (initialise with enable_readback on a surface "
+               "that supports TRANSFER_SRC)";
+
+    switch (swap.format()) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB: rb.order = utils::PixelOrder::BGRA; break;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: rb.order = utils::PixelOrder::RGBA; break;
+    default: return "unsupported swapchain format for readback: " + std::to_string(swap.format());
     }
 
-    VVK_CHECK_VOID_RE(m_upload_cmd.Begin(VkCommandBufferBeginInfo {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    rb.extent            = { image.extent.width, image.extent.height };
+    const VkDeviceSize n = (VkDeviceSize)rb.extent.width * rb.extent.height * 4;
+    VkBufferCreateInfo ci {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    }));
-    VkImageSubresourceRange range {
+        .size  = n,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    };
+    VmaAllocationCreateInfo vma_info {};
+    vma_info.usage  = VMA_MEMORY_USAGE_CPU_ONLY; // host visible + coherent
+    rb.buf.req_size = n;
+    if (auto res = vvk::CreateBuffer(device().vma_allocator(), ci, vma_info, rb.buf.handle);
+        res != VK_SUCCESS)
+        return "cannot allocate the readback buffer (VkResult " + std::to_string(res) + ")";
+    return {};
+}
+
+// Records the copy into the frame's own command buffer, after FinPass has left
+// the image in PRESENT_SRC_KHR. The image therefore never leaves the queue that
+// rendered it, and no queue-family ownership transfer is involved; the present
+// semaphore is signalled only after the copy completes.
+void VulkanRender::Impl::recordReadback(vvk::CommandBuffer& cmd, const ImageParameters& image,
+                                        ShotReadback& rb) {
+    const VkImageSubresourceRange range {
         .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
         .baseMipLevel   = 0,
         .levelCount     = 1,
@@ -526,7 +600,7 @@ void VulkanRender::Impl::readbackToFile(const ImageParameters& image, VkFormat f
     VkImageMemoryBarrier to_src {
         .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .pNext               = nullptr,
-        .srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         .dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
         .oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -535,75 +609,61 @@ void VulkanRender::Impl::readbackToFile(const ImageParameters& image, VkFormat f
         .image               = image.handle,
         .subresourceRange    = range,
     };
-    m_upload_cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0,
-                                 {},
-                                 {},
-                                 spanone { to_src });
+    cmd.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        {},
+                        {},
+                        spanone { to_src });
+
     VkBufferImageCopy region {
         .bufferOffset      = 0,
         .bufferRowLength   = 0,
         .bufferImageHeight = 0,
         .imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
         .imageOffset       = { 0, 0, 0 },
-        .imageExtent       = { w, h, 1 },
+        .imageExtent       = { rb.extent.width, rb.extent.height, 1 },
     };
-    m_upload_cmd.CopyImageToBuffer(
-        image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *buf.handle, spanone { region });
-    VkImageMemoryBarrier back = to_src;
-    back.srcAccessMask        = VK_ACCESS_TRANSFER_READ_BIT;
-    back.dstAccessMask        = VK_ACCESS_MEMORY_READ_BIT;
-    back.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    back.newLayout            = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    m_upload_cmd.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 0,
-                                 {},
-                                 {},
-                                 spanone { back });
-    VVK_CHECK_VOID_RE(m_upload_cmd.End());
-    {
-        vvk::Fence fence;
-        VVK_CHECK_VOID_RE(device().handle().CreateFence(
-            VkFenceCreateInfo {
-                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-                .pNext = nullptr,
-                .flags = 0,
-            },
-            fence));
-        VkSubmitInfo sub {
-            .sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext              = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers    = m_upload_cmd.address(),
-        };
-        {
-            std::lock_guard<std::mutex> lk(device().queue_mutex());
-            VVK_CHECK_VOID_RE(device().graphics_queue().handle.Submit(sub, *fence));
-        }
-        VVK_CHECK_VOID_RE(fence.Wait(vk_wait_time));
-    }
+    cmd.CopyImageToBuffer(
+        image.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *rb.buf.handle, spanone { region });
 
+    VkImageMemoryBarrier to_present = to_src;
+    to_present.srcAccessMask        = VK_ACCESS_TRANSFER_READ_BIT;
+    to_present.dstAccessMask        = 0;
+    to_present.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_present.newLayout            = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkBufferMemoryBarrier to_host {
+        .sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .pNext               = nullptr,
+        .srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask       = VK_ACCESS_HOST_READ_BIT,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer              = *rb.buf.handle,
+        .offset              = 0,
+        .size                = VK_WHOLE_SIZE,
+    };
+    cmd.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                        0,
+                        {},
+                        spanone { to_host },
+                        spanone { to_present });
+}
+
+// Runs after the frame fence has signalled.
+std::string VulkanRender::Impl::writeReadback(ShotReadback& rb, const std::string& path) {
     void* raw = nullptr;
-    VVK_CHECK_VOID_RE(buf.handle.MapMemory(&raw));
-    const bool    bgr = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
-    std::ofstream out(path, std::ios::binary);
-    out << "P6\n" << w << " " << h << "\n255\n";
-    std::vector<uint8_t> row((size_t)w * 3);
-    const auto*          px = static_cast<const uint8_t*>(raw);
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            const uint8_t* p = px + ((size_t)y * w + x) * 4;
-            row[x * 3 + 0]   = bgr ? p[2] : p[0];
-            row[x * 3 + 1]   = p[1];
-            row[x * 3 + 2]   = bgr ? p[0] : p[2];
-        }
-        out.write(reinterpret_cast<const char*>(row.data()), (std::streamsize)row.size());
-    }
-    out.close();
-    buf.handle.UnMapMemory();
-    LOG_INFO("screenshot written: %s (%ux%u)", path.c_str(), w, h);
+    if (auto res = rb.buf.handle.MapMemory(&raw); res != VK_SUCCESS || raw == nullptr)
+        return "cannot map the readback buffer (VkResult " + std::to_string(res) + ")";
+    const std::string err = utils::WritePpmAtomic(path,
+                                                  rb.extent.width,
+                                                  rb.extent.height,
+                                                  static_cast<const std::uint8_t*>(raw),
+                                                  (std::size_t)rb.buf.req_size,
+                                                  rb.order);
+    rb.buf.handle.UnMapMemory();
+    return err;
 }
 void VulkanRender::Impl::drawFrameOffscreen() {
     RenderingResources& rr    = m_rendering_resources;
