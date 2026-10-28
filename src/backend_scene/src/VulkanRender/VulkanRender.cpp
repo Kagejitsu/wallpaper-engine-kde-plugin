@@ -22,6 +22,7 @@
 #include "PrePass.hpp"
 #include "FinPass.hpp"
 #include "Resource.hpp"
+#include "VideoTexture.hpp"
 
 #include "Core/ArrayHelper.hpp"
 
@@ -99,8 +100,11 @@ struct VulkanRender::Impl {
     // Per-screen command pool, render-target pool, output extent and token.
     vvk::CommandPool              m_cmd_pool;
     std::unique_ptr<TextureCache> m_rt_pool;
-    VkExtent2D                    m_out_extent { 1, 1 };
-    ScreenToken                   m_token { 0 };
+    // live video textures of the current graph (see VideoTexture.hpp)
+    std::unique_ptr<VideoTextures> m_videos;
+    double                         m_scene_time { 0.0 };
+    VkExtent2D                     m_out_extent { 1, 1 };
+    ScreenToken                    m_token { 0 };
 
     std::unique_ptr<PrePass> m_prepass { nullptr };
     std::unique_ptr<FinPass> m_finpass { nullptr };
@@ -232,6 +236,7 @@ bool VulkanRender::Impl::init(RenderInitInfo info) {
         VVK_CHECK_BOOL_RE(device().handle().CreateCommandPool(pool_info, m_cmd_pool));
     }
     m_rt_pool = std::make_unique<TextureCache>(device(), m_cmd_pool);
+    m_videos  = std::make_unique<VideoTextures>(device());
 
     // The offscreen swapchain is created lazily in beginFrameSource(): a screen
     // that ends up mirroring another never allocates one.
@@ -321,6 +326,7 @@ void VulkanRender::Impl::destroy() {
         // still alive, then drop the asset references it held. A secondary still
         // holding our swapchain keeps it alive via shared_ptr.
         m_ex_swapchain.reset();
+        m_videos.reset();
         m_rt_pool.reset();
         device().asset_cache().ReleaseScreen(m_token);
     }
@@ -355,6 +361,7 @@ bool VulkanRender::Impl::CreateRenderingResource(RenderingResources& rr) {
     rr.dyn_buf      = m_dyn_buf.get();
     rr.rt_pool      = m_rt_pool.get();
     rr.screen_token = m_token;
+    rr.videos       = m_videos.get();
     return true;
 }
 
@@ -384,6 +391,7 @@ void VulkanRender::Impl::drawFrame(Scene& scene) {
             RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE((VkInstance)instance().inst()), NULL);
 #endif
 
+    m_scene_time = scene.elapsingTime;
     if (instance().offscreen()) {
         drawFrameOffscreen();
     } else {
@@ -420,6 +428,7 @@ void VulkanRender::Impl::drawFrameSwapchain() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     });
     m_dyn_buf->recordUpload(rr.command);
+    if (m_videos) m_videos->RecordUpdates(rr.command, m_scene_time);
     for (auto* p : m_passes) {
         if (p->prepared()) {
             p->execute(device(), rr);
@@ -470,6 +479,7 @@ void VulkanRender::Impl::drawFrameOffscreen() {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     });
     m_dyn_buf->recordUpload(rr.command);
+    if (m_videos) m_videos->RecordUpdates(rr.command, m_scene_time);
 
     for (auto* p : m_passes) {
         if (p->prepared()) {
@@ -632,6 +642,8 @@ void VulkanRender::Impl::clearLastRenderGraph() {
         p->destory(device(), m_rendering_resources);
     }
     m_passes.clear();
+    // The device is idle: video decoders and their images can go.
+    if (m_videos) m_videos->Clear();
     // Drop only this screen's render targets and asset references; textures that
     // other screens still hold survive.
     m_rt_pool->Clear();
