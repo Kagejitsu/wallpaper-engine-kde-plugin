@@ -69,12 +69,24 @@ std::optional<vvk::RenderPass> CreateRenderPass(const vvk::Device& device, VkFor
         .pColorAttachments    = &attachment_ref,
     };
 
+    // Chain the acquire semaphore wait through the initial attachment layout transition.
+    VkSubpassDependency dependency {
+        .srcSubpass    = VK_SUBPASS_EXTERNAL,
+        .dstSubpass    = 0,
+        .srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+
     VkRenderPassCreateInfo creatinfo {
         .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments    = &attachment,
         .subpassCount    = 1,
         .pSubpasses      = &subpass,
+        .dependencyCount = 1,
+        .pDependencies   = &dependency,
     };
     vvk::RenderPass pass;
     if (auto res = device.CreateRenderPass(creatinfo, pass); res == VK_SUCCESS) {
@@ -223,6 +235,29 @@ void FinPass::execute(const Device& device, RenderingResources& rr) {
             .pImageInfo      = &desc_img,
         };
         cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.layout, 0, wset);
+
+        // The canvas was just written by the scene passes (colour attachment) or
+        // cleared/copied (transfer). A render pass's implicit end dependency gives
+        // no visibility to a later sampled read, so make those writes visible here;
+        // without it whole tiles of the last layers drawn were missing from the
+        // presented frame.
+        VkImageMemoryBarrier canvas_bar {
+            .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext         = nullptr,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = m_desc.vk_result.handle,
+            .subresourceRange    = base_srang,
+        };
+        cmd.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                            0,
+                            canvas_bar);
     }
 
     // do queue family transfer operation

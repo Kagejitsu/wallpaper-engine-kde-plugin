@@ -355,7 +355,11 @@ bool VulkanRender::Impl::CreateRenderingResource(RenderingResources& rr) {
     if (m_with_surface) {
         VkSemaphoreCreateInfo ci { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
                                    .pNext = nullptr };
-        VVK_CHECK_BOOL_RE(device().handle().CreateSemaphore(ci, rr.sem_swap_finish));
+        // Reacquiring an image guarantees its previous presentation consumed this semaphore.
+        rr.sem_swap_finish.resize(device().swapchain().images().size());
+        for (auto& semaphore : rr.sem_swap_finish) {
+            VVK_CHECK_BOOL_RE(device().handle().CreateSemaphore(ci, semaphore));
+        }
         VVK_CHECK_BOOL_RE(device().handle().CreateSemaphore(ci, rr.sem_swap_wait_image));
     }
 
@@ -408,11 +412,8 @@ void VulkanRender::Impl::drawFrame(Scene& scene) {
 }
 
 void VulkanRender::Impl::drawFrameSwapchain() {
-    static size_t resource_index = 0;
-
-    RenderingResources& rr = m_rendering_resources;
-    resource_index         = (resource_index + 1) % 3;
-    uint32_t image_index   = 0;
+    RenderingResources& rr          = m_rendering_resources;
+    uint32_t            image_index = 0;
     {
         VVK_CHECK_VOID_RE(device().handle().AcquireNextImageKHR(*device().swapchain().handle(),
                                                                 vk_wait_time,
@@ -420,7 +421,8 @@ void VulkanRender::Impl::drawFrameSwapchain() {
                                                                 {},
                                                                 &image_index));
     }
-    const auto& image = device().swapchain().images()[image_index];
+    const auto& image           = device().swapchain().images()[image_index];
+    const auto& render_finished = rr.sem_swap_finish[image_index];
 
     m_finpass->setPresent(image);
 
@@ -447,14 +449,14 @@ void VulkanRender::Impl::drawFrameSwapchain() {
                 .commandBufferCount   = 1,
                 .pCommandBuffers      = rr.command.address(),
                 .signalSemaphoreCount = 1,
-                .pSignalSemaphores    = rr.sem_swap_finish.address(),
+                .pSignalSemaphores    = render_finished.address(),
     };
 
     VkPresentInfoKHR present_info {
         .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .pNext              = nullptr,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores    = rr.sem_swap_finish.address(),
+        .pWaitSemaphores    = render_finished.address(),
         .swapchainCount     = 1,
         .pSwapchains        = device().swapchain().handle().address(),
         .pImageIndices      = &image_index,

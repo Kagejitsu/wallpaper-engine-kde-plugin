@@ -32,6 +32,7 @@ ColumnLayout {
     property alias  cfg_SceneCachePasses:    settingPage.cfg_SceneCachePasses
     property alias  cfg_ShareGpuContext:     settingPage.cfg_ShareGpuContext
     property alias  cfg_MirrorScene:         settingPage.cfg_MirrorScene
+    property alias  cfg_SpanScreens:         settingPage.cfg_SpanScreens
     property alias  cfg_Speed:               settingPage.cfg_Speed
     property alias  cfg_MuteAudio:           settingPage.cfg_MuteAudio
     property alias  cfg_MouseInput:          settingPage.cfg_MouseInput
@@ -127,6 +128,8 @@ ColumnLayout {
     Component.onCompleted: {
         initialWallpaperSource = cfg_WallpaperSource;
         initialWallpaperWorkShopId = cfg_WallpaperWorkShopId;
+        if(globalCfg.enabled)
+            cfg_SpanScreens = globalCfg.get("SpanScreens", cfg_SpanScreens);
         // Seed the library from detection, the folder button stays an override.
         // Filling the value keeps every "is it configured" test below correct.
         if(!cfg_SteamLibraryPath && steamDetect.library)
@@ -142,7 +145,8 @@ ColumnLayout {
                 "SwitchTimer":         cfg_SwitchTimer,
                 "NoRandomWhilePaused": cfg_NoRandomWhilePaused,
                 "FilterStr":           cfg_FilterStr,
-                "SortMode":            cfg_SortMode
+                "SortMode":            cfg_SortMode,
+                "SpanScreens":         cfg_SpanScreens
             };
             // Only sync the wallpaper itself if the user actually changed the
             // selection this session, so we never overwrite the shared wallpaper

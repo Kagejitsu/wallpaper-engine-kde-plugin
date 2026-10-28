@@ -88,10 +88,11 @@ Item {
 
                 const playlists = jsonData?.steamuser?.general?.playlists || [];
                 playlists.forEach(function(el) {
-                    // we're going to be using paths to match wallpapers to playlists, but the paths in the config will start with a Windows-style drive letter
-                    // so we need to convert them to file:// URLs. In addition it appears that the paths are truncated to 110 chars elsewhere so we will do the same
-                    // so that they can match later
-                    root.playlists[el.name] = new Set(el.items.map(el => "file://" + el.substring(2).replace(/\/[^\/]*$/, "").substring(0,110))); 
+                    // Normalize native Windows paths and saved file URLs like the folder model.
+                    root.playlists[el.name] = new Set(el.items.map(item => {
+                        const path = item.startsWith('file:') ? Common.urlNative(item) : item.substring(2);
+                        return Common.localFileUrl(path.replace(/\/[^\/]*$/, "").substring(0,110));
+                    }));
                     // add the playlist to the filter model preserving it's previous selection status
                     filterModel.append({type: "playlist", key: el.name, text: el.name, def: selectedPlaylists.has(el.name) ? 1 : 0});                    
                 });
@@ -198,8 +199,7 @@ Item {
             folder.items.forEach(el => {
                 const v = Object.assign({}, Common.wpitem_template);
                 v.workshopid = el.name;
-                // use qurl to convert to file://
-                v.path = Qt.resolvedUrl(folder_dir + '/' + el.name).toString();
+                v.path = Common.localFileUrl(folder_dir + '/' + el.name);
                 v.modified = el.mtime;
                 root._initItemOp(v);
                 proxyModel.push(v);

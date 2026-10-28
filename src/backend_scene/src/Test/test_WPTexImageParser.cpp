@@ -440,6 +440,71 @@ TEST_SUITE("WPTexImageParser") {
         }
     }
 
+    TEST_CASE("Video texture returns transparent pixels instead of encoded data") {
+        auto buf = makeTexHeader(1, 1, 1, 0, 1u << 5, 1920, 1080, 1920, 1080, 1);
+        appendInt32(buf, 1);
+        appendMipmapV1(buf, 1920, 1080, { 0, 0, 0, 12, 'f', 't', 'y', 'p' });
+        VFS vfs;
+        mountTex(vfs, "video", std::move(buf));
+        WPTexImageParser parser(&vfs);
+        auto             img = parser.Parse("video");
+        REQUIRE(img != nullptr);
+        REQUIRE(img->slots.size() == 1);
+        REQUIRE(img->slots[0].HasValidMipmaps(img->header.format));
+        CHECK(img->slots[0].width == 1);
+        for (int i = 0; i < 4; ++i) CHECK(img->slots[0].mipmaps[0].data.get()[i] == 0);
+    }
+
+    TEST_CASE("Truncated mip payload is rejected") {
+        auto buf = makeSimpleRGBA8Tex(4, 4);
+        buf.pop_back();
+        VFS vfs;
+        mountTex(vfs, "truncated", std::move(buf));
+        WPTexImageParser parser(&vfs);
+        CHECK(parser.Parse("truncated") == nullptr);
+    }
+
+    TEST_CASE("Upload validation rejects short pixels and invalid mip extents") {
+        VFS vfs;
+        mountTex(vfs, "upload", makeSimpleRGBA8Tex(8, 8));
+        WPTexImageParser parser(&vfs);
+        auto             img = parser.Parse("upload");
+        REQUIRE(img != nullptr);
+        auto& slot = img->slots[0];
+        REQUIRE(slot.HasValidMipmaps(TextureFormat::RGBA8));
+        SUBCASE("short uncompressed payload") { slot.mipmaps[0].size -= 1; }
+        SUBCASE("missing pixels") { slot.mipmaps[0].data.reset(); }
+        SUBCASE("too many mip levels") { slot.mipmaps.resize(5); }
+        SUBCASE("wrong base extent") { slot.mipmaps[0].width = 9; }
+        SUBCASE("invalid base extent") { slot.width = -8; }
+        SUBCASE("mip extent larger than its level") {
+            ImageData mip;
+            mip.width  = 8;
+            mip.height = 8;
+            mip.size   = 256;
+            mip.data   = ImageDataPtr(new uint8_t[256], [](uint8_t* p) {
+                delete[] p;
+            });
+            slot.mipmaps.push_back(std::move(mip));
+        }
+        SUBCASE("staging size truncation") { slot.mipmaps[0].size = (isize)UINT32_MAX + 1; }
+        CHECK_FALSE(slot.HasValidMipmaps(TextureFormat::RGBA8));
+    }
+
+    TEST_CASE("Upload validation rounds compressed edge blocks up") {
+        auto buf = makeTexHeader(1, 1, 1, 7, 0, 5, 3, 5, 3, 1);
+        appendInt32(buf, 1);
+        appendMipmapV1(buf, 5, 3, std::vector<uint8_t>(16, 0));
+        VFS vfs;
+        mountTex(vfs, "edge_blocks", std::move(buf));
+        WPTexImageParser parser(&vfs);
+        auto             img = parser.Parse("edge_blocks");
+        REQUIRE(img != nullptr);
+        CHECK(img->slots[0].HasValidMipmaps(TextureFormat::BC1));
+        img->slots[0].mipmaps[0].size = 15;
+        CHECK_FALSE(img->slots[0].HasValidMipmaps(TextureFormat::BC1));
+    }
+
     TEST_CASE("Zero src_size returns nullptr") {
         auto buf = makeTexHeader(1, 1, 1, 0, 0, 4, 4, 4, 4, 1);
         appendInt32(buf, 1); // mipmap_count

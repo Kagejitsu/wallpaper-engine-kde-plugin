@@ -26,6 +26,7 @@ enum class WPTexFlagEnum : uint32_t
     // true for no repeat
     clampUVs = 1,
     sprite   = 2,
+    video    = 5,
 
     compo1 = 20,
     compo2 = 21,
@@ -83,6 +84,7 @@ void LoadHeader(fs::IBinaryStream& file, ImageHeader& header) {
         header.extraHeader["compo1"].val = flags[WPTexFlagEnum::compo1];
         header.extraHeader["compo2"].val = flags[WPTexFlagEnum::compo2];
         header.extraHeader["compo3"].val = flags[WPTexFlagEnum::compo3];
+        header.extraHeader["video"].val  = flags[WPTexFlagEnum::video];
     }
 
     /*
@@ -180,6 +182,13 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
     auto  startpos = file.Tell();
     LoadHeader(file, img.header);
 
+    if (img.header.extraHeader["video"].val) {
+        LOG_INFO("tex \"%s\" contains unsupported video; using transparent fallback", name.c_str());
+        auto fallback = MakeFallbackImage(name);
+        std::fill_n(fallback->slots[0].mipmaps[0].data.get(), 4, (uint8_t)0);
+        return fallback;
+    }
+
     // image
     i32 _image_count = img.header.count;
     if (_image_count < 0) {
@@ -237,7 +246,11 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
 
             char* result;
             result = new char[(usize)src_size];
-            file.Read(result, (usize)src_size);
+            if (file.Read(result, (usize)src_size) != (usize)src_size) {
+                LOG_ERROR("truncated tex \"%s\" mipmap payload", name.c_str());
+                delete[] result;
+                return nullptr;
+            }
 
             // is LZ4 compress
             if (LZ4_compressed) {

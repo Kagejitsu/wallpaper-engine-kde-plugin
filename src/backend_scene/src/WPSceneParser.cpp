@@ -934,6 +934,8 @@ struct ParticleChildPtr {
 
 void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& wppartobj,
                       ParticleChildPtr child_ptr = {}) {
+    if (! wppartobj.visible) return;
+
     struct ChildData {
         ChildData() = default;
         ChildData(const wpscene::ParticleChild& o)
@@ -1141,8 +1143,10 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
                                             const std::string& userPropsOverride) {
     // Load user properties from project.json if available
     WPUserProperties userProps;
-    if (vfs.Contains("/assets/project.json")) {
-        auto projectFile = vfs.Open("/assets/project.json");
+    const char*      projectPath =
+        vfs.Contains("/project/project.json") ? "/project/project.json" : "/assets/project.json";
+    if (vfs.Contains(projectPath)) {
+        auto projectFile = vfs.Open(projectPath);
         if (projectFile) {
             std::string projectContent = projectFile->ReadAllStr();
             if (userProps.LoadFromProjectJson(projectContent)) {

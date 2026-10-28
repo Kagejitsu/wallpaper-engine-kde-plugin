@@ -33,6 +33,7 @@ jobs:
             ninja \
             extra-cmake-modules \
             libplasma \
+            kirigami \
             qt6-declarative \
             qt6-webchannel \
             vulkan-headers \
@@ -42,11 +43,16 @@ jobs:
       - name: Configure
         run: |
           cmake -B build -S . \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON \
             -G Ninja
 
       - name: Build
         run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: |
+          ctest --test-dir build --output-on-failure
+          ctest --test-dir build -R qml_tests --no-tests=error --output-on-failure
 
   # ── Fedora (secondary target distribution) ───────────────────────────────
   build-fedora:
@@ -89,17 +95,23 @@ jobs:
             mpv-libs-devel \
             qt6-qtbase-private-devel \
             libplasma-devel \
+            kf6-kirigami \
             qt6-qtwebchannel-devel \
             qt6-qtdeclarative-devel
 
       - name: Configure
         run: |
           cmake -B build -S . \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON \
             -G Ninja
 
       - name: Build
         run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: |
+          ctest --test-dir build --output-on-failure
+          ctest --test-dir build -R qml_tests --no-tests=error --output-on-failure
 
   # ── Hyprland host (separate CMake project, no KDE dependencies) ───────────
   build-hyprland:

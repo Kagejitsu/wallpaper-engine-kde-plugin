@@ -1,8 +1,9 @@
 enable_testing()
 
+get_filename_component(SCENE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(DOCTEST_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/third_party/nlohmann/tests/thirdparty/doctest")
-set(SRC_DIR "${CMAKE_SOURCE_DIR}/src")
+    "${SCENE_DIR}/third_party/nlohmann/tests/thirdparty/doctest")
+set(SRC_DIR "${SCENE_DIR}/src")
 
 add_executable(backend_scene_tests
     test_main.cpp
@@ -34,3 +35,22 @@ target_link_libraries(backend_scene_tests PRIVATE
 target_compile_options(backend_scene_tests PRIVATE ${warn_opts})
 
 add_test(NAME backend_scene_tests COMMAND backend_scene_tests)
+
+add_executable(backend_scene_parser_tests
+    test_main.cpp
+    test_WPShaderParser.cpp
+    test_WPMdlParser.cpp
+    test_WPMaterial.cpp
+    test_WPSceneParser.cpp
+)
+target_include_directories(backend_scene_parser_tests PRIVATE ${DOCTEST_INCLUDE_DIR})
+target_link_libraries(backend_scene_parser_tests PRIVATE
+    wescene-renderer wpFs wpScene wpAudio wpParticle wpVulkan nlohmann_json)
+add_test(NAME backend_scene_parser_tests COMMAND backend_scene_parser_tests)
+set_tests_properties(backend_scene_parser_tests PROPERTIES TIMEOUT 30)
+
+add_executable(backend_scene_shader_tests test_main.cpp test_ShaderCompiler.cpp)
+target_include_directories(backend_scene_shader_tests PRIVATE
+    ${SRC_DIR} ${DOCTEST_INCLUDE_DIR})
+target_link_libraries(backend_scene_shader_tests PRIVATE wpVulkan)
+add_test(NAME backend_scene_shader_tests COMMAND backend_scene_shader_tests)

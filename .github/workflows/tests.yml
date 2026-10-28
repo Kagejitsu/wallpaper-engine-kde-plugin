@@ -7,12 +7,13 @@ on:
 
 jobs:
   unit-tests:
-    name: FileHelper unit tests (Qt6 only)
+    name: Native helper tests (Qt6 only)
     runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
-        # No submodules needed — tests only depend on Qt6 Core + Test
+        # Keep Qt Core/Test compatibility on Ubuntu's older Qt.
+        # Supported Qt 6.7+ QML is tested by both full-build jobs.
 
       - name: Install Qt6
         run: |

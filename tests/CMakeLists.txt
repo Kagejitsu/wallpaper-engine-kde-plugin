@@ -33,3 +33,11 @@ add_executable(tst_steampaths
 target_include_directories(tst_steampaths PRIVATE ${WEKDE_SRC_DIR})
 target_link_libraries(tst_steampaths PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME tst_steampaths COMMAND tst_steampaths -v2)
+
+find_package(Qt6 6.7 QUIET COMPONENTS QuickTest)
+if(Qt6_FOUND AND TARGET Qt6::qmltestrunner)
+    add_test(NAME qml_tests COMMAND Qt6::qmltestrunner
+        -input ${CMAKE_CURRENT_SOURCE_DIR}/qml)
+    set_tests_properties(qml_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
+endif()
