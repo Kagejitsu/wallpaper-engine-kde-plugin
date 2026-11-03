@@ -32,6 +32,7 @@ ColumnLayout {
     property alias  cfg_SceneCachePasses:    settingPage.cfg_SceneCachePasses
     property alias  cfg_ShareGpuContext:     settingPage.cfg_ShareGpuContext
     property alias  cfg_MirrorScene:         settingPage.cfg_MirrorScene
+    property alias  cfg_SpanScreens:         settingPage.cfg_SpanScreens
     property alias  cfg_Speed:               settingPage.cfg_Speed
     property alias  cfg_MuteAudio:           settingPage.cfg_MuteAudio
     property alias  cfg_MouseInput:          settingPage.cfg_MouseInput
@@ -115,6 +116,22 @@ ColumnLayout {
     // and wake the running wallpaper(s) (the config dialog may be another process).
     GlobalConfig {
         id: globalCfg
+        onPersistenceFailed: function(error) {
+            pyext.notifySaveError("Shared wallpaper settings could not be saved. Previous settings were kept.");
+            globalSaveError.reason = error;
+            globalSaveError.open();
+        }
+    }
+    Dialog {
+        id: globalSaveError
+        property string reason: ""
+        title: "Cannot update shared wallpaper settings"
+        modal: true
+        standardButtons: Dialog.Ok
+        Label {
+            text: "The previous settings were kept.\n" + globalSaveError.reason
+            wrapMode: Text.Wrap
+        }
     }
     WallpaperSyncBus {
         id: syncBus
@@ -127,6 +144,8 @@ ColumnLayout {
     Component.onCompleted: {
         initialWallpaperSource = cfg_WallpaperSource;
         initialWallpaperWorkShopId = cfg_WallpaperWorkShopId;
+        if(globalCfg.enabled)
+            cfg_SpanScreens = globalCfg.get("SpanScreens", cfg_SpanScreens);
         // Seed the library from detection, the folder button stays an override.
         // Filling the value keeps every "is it configured" test below correct.
         if(!cfg_SteamLibraryPath && steamDetect.library)
@@ -135,15 +154,16 @@ ColumnLayout {
 
     function saveConfig() {
         wallpaperPage.saveConfig();
-        globalCfg.enabled = cfg_GlobalMode;
+        const batch = { "enabled": cfg_GlobalMode };
         if(cfg_GlobalMode) {
-            const batch = {
+            Object.assign(batch, {
                 "RandomizeWallpaper":  cfg_RandomizeWallpaper,
                 "SwitchTimer":         cfg_SwitchTimer,
                 "NoRandomWhilePaused": cfg_NoRandomWhilePaused,
                 "FilterStr":           cfg_FilterStr,
-                "SortMode":            cfg_SortMode
-            };
+                "SortMode":            cfg_SortMode,
+                "SpanScreens":         cfg_SpanScreens
+            });
             // Only sync the wallpaper itself if the user actually changed the
             // selection this session, so we never overwrite the shared wallpaper
             // with a stale per-screen value.
@@ -152,9 +172,12 @@ ColumnLayout {
                 batch["WallpaperSource"] = cfg_WallpaperSource;
                 batch["WallpaperWorkShopId"] = cfg_WallpaperWorkShopId;
             }
-            globalCfg.setBatch(batch);
         }
-        syncBus.broadcastGlobalChanged();
+        if(globalCfg.setBatch(batch)) {
+            initialWallpaperSource = cfg_WallpaperSource;
+            initialWallpaperWorkShopId = cfg_WallpaperWorkShopId;
+            syncBus.broadcastGlobalChanged();
+        }
     }
 
     WallpaperListModel {

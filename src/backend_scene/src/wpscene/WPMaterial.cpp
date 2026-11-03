@@ -11,7 +11,9 @@ namespace
 void ApplyUserShaderValues(const nlohmann::json&                                json,
                            std::unordered_map<std::string, std::vector<float>>& out) {
     using wallpaper::g_currentUserProperties;
-    if (! json.contains("usershadervalues") || g_currentUserProperties == nullptr) return;
+    if (! json.contains("usershadervalues") || ! json.at("usershadervalues").is_object() ||
+        g_currentUserProperties == nullptr)
+        return;
     for (const auto& jU : json.at("usershadervalues").items()) {
         if (! jU.value().is_string()) continue;
         auto prop = g_currentUserProperties->GetProperty(jU.key());

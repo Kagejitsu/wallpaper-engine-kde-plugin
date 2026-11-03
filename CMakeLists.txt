@@ -72,10 +72,13 @@ endif()
 set(QMLPLUGIN_URI "com.github.catsout.wallpaperEngineKde")
 string(REPLACE "." "/" QMLPLUGIN_INSTALL_URI ${QMLPLUGIN_URI})
 
-add_subdirectory(src)
-
-option(BUILD_TESTS "Build unit tests (requires only Qt6 Core+Test)" OFF)
+option(BUILD_TESTS "Build unit tests" OFF)
 if(BUILD_TESTS)
     enable_testing()
+endif()
+
+add_subdirectory(src)
+
+if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()

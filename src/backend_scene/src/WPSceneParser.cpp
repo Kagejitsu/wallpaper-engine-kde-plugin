@@ -550,23 +550,6 @@ void InitContext(ParseContext& context, fs::VFS& vfs, wpscene::WPScene& sc) {
     }
 }
 
-// A "video texture" is a .tex whose single mip holds an MP4 file verbatim
-// (look for the ISO-BMFF "ftyp" box right after the header). The renderer
-// can't decode it; the host plays it underneath instead (see VideoUnderlay).
-bool IsVideoTextureLayer(fs::VFS& vfs, const wpscene::WPImageObject& img) {
-    if (! img.visible || img.material.textures.empty()) return false;
-    const auto& tex = img.material.textures.front();
-    if (tex.empty()) return false;
-    auto f = vfs.Open("/assets/materials/" + tex + ".tex");
-    if (! f) return false;
-    std::array<char, 256> head {};
-    auto                  n = f->Read(head.data(), head.size());
-    if (n < 16 || std::string_view(head.data(), 4) != "TEXV") return false;
-    const std::string_view sv(head.data(), (usize)n);
-    return sv.find("ftyp") != std::string_view::npos ||           // MP4
-           sv.find("\x1A\x45\xDF\xA3") != std::string_view::npos; // WebM/Matroska (EBML)
-}
-
 void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
     auto& wpimgobj = img_obj;
     auto& vfs      = *context.vfs;
@@ -662,6 +645,8 @@ void ParseImageObj(ParseContext& context, wpscene::WPImageObject& img_obj) {
         baseConstSvs["g_Color4"] = std::array<float, 4> {
             wpimgobj.color[0], wpimgobj.color[1], wpimgobj.color[2], wpimgobj.alpha
         };
+        baseConstSvs["g_Color"]      = wpimgobj.color;
+        baseConstSvs["g_Alpha"]      = wpimgobj.alpha;
         baseConstSvs["g_UserAlpha"]  = wpimgobj.alpha;
         baseConstSvs["g_Brightness"] = wpimgobj.brightness;
 
@@ -974,6 +959,8 @@ struct ParticleChildPtr {
 
 void ParseParticleObj(ParseContext& context, wpscene::WPParticleObject& wppartobj,
                       ParticleChildPtr child_ptr = {}) {
+    if (! wppartobj.visible) return;
+
     struct ChildData {
         ChildData() = default;
         ChildData(const wpscene::ParticleChild& o)
@@ -1319,11 +1306,13 @@ void LinkLayersAndScripts(ParseContext& context, const nlohmann::json& json_objs
 
 std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std::string& buf,
                                             fs::VFS& vfs, audio::SoundManager& sm,
-                                            const std::string& userPropsOverride) {
+                                            const std::string& userPropsOverride) try {
     // Load user properties from project.json if available
     WPUserProperties userProps;
-    if (vfs.Contains("/assets/project.json")) {
-        auto projectFile = vfs.Open("/assets/project.json");
+    const char*      projectPath =
+        vfs.Contains("/project/project.json") ? "/project/project.json" : "/assets/project.json";
+    if (vfs.Contains(projectPath)) {
+        auto projectFile = vfs.Open(projectPath);
         if (projectFile) {
             std::string projectContent = projectFile->ReadAllStr();
             if (userProps.LoadFromProjectJson(projectContent)) {
@@ -1344,7 +1333,10 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
     nlohmann::json json;
     if (! PARSE_JSON(buf, json)) return nullptr;
     wpscene::WPScene sc;
-    sc.FromJson(json);
+    if (! sc.FromJson(json) || ! json.contains("objects") || ! json.at("objects").is_array()) {
+        LOG_ERROR("Invalid scene structure");
+        return nullptr;
+    }
     //	LOG_INFO(nlohmann::json(sc).dump(4));
 
     ParseContext context;
@@ -1378,28 +1370,7 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         sc.general.orthogonalprojection.height = h;
     }
 
-    // Video underlay: the bottom layer is an embedded MP4 the renderer can't
-    // decode. Drop it and render the rest over a transparent background; the
-    // QML side plays the video beneath with mpv.
-    // The bottom *drawable* layer: sounds and lights are not drawn, skip them.
-    bool video_underlay = false;
-    for (auto it = wp_objs.begin(); it != wp_objs.end(); ++it) {
-        if (std::holds_alternative<wpscene::WPSoundObject>(*it) ||
-            std::holds_alternative<wpscene::WPLightObject>(*it))
-            continue;
-        auto* img = std::get_if<wpscene::WPImageObject>(&*it);
-        if (img != nullptr && IsVideoTextureLayer(vfs, *img)) {
-            LOG_INFO("video underlay: bottom layer '%s' is a video texture, skipping it",
-                     img->name.c_str());
-            wp_objs.erase(it);
-            sc.general.clearcolor = { 0.0f, 0.0f, 0.0f };
-            video_underlay        = true;
-        }
-        break;
-    }
-
     InitContext(context, vfs, sc);
-    if (video_underlay) context.scene->clearAlpha = 0.0f;
     ParseCamera(context, sc.general);
 
     {
@@ -1420,9 +1391,13 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
         };
     }
 
-    context.scene->scene_id = scene_id;
+    context.scene->scene_id        = scene_id;
+    context.scene->user_props_json = userPropsOverride;
 
     WPShaderParser::InitGlslang();
+    struct GlslangScope {
+        ~GlslangScope() { WPShaderParser::FinalGlslang(); }
+    } glslangScope;
 
     for (WPObjectVar& obj : wp_objs) {
         std::visit(visitor::overload {
@@ -1442,8 +1417,9 @@ std::shared_ptr<Scene> WPSceneParser::Parse(std::string_view scene_id, const std
                    obj);
     }
 
-    WPShaderParser::FinalGlslang();
-
     LinkLayersAndScripts(context, json.at("objects"), userProps);
     return context.scene;
+} catch (const nlohmann::json::exception& e) {
+    LOG_ERROR("Invalid scene data: %s", e.what());
+    return nullptr;
 }

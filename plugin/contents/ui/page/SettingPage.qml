@@ -28,6 +28,7 @@ Flickable {
     property alias cfg_SceneCachePasses: ckbox_cacheScenePasses.checked
     property alias cfg_ShareGpuContext: ckbox_shareGpuContext.checked
     property alias cfg_MirrorScene: ckbox_mirrorScene.checked
+    property alias cfg_SpanScreens: ckbox_spanScreens.checked
     property string cfg_MpvHwdec
     property alias cfg_Speed: spin_speed.dValue
     property alias cfg_MuteAudio: ckbox_muteAudio.checked
@@ -177,6 +178,22 @@ Flickable {
                     textRole: "text"
                     onActivated: cfg_DisplayMode = Common.cbCurrentValue(this)
                     Component.onCompleted: currentIndex = Common.cbIndexOfValue(this, cfg_DisplayMode)
+                }
+            }
+
+            OptionItem {
+                text: 'Span Across Screens'
+                text_color: Kirigami.Theme.textColor
+                icon: '../../images/window.svg'
+                actor: Switch {
+                    id: ckbox_spanScreens
+                }
+                contentBottom: Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: Kirigami.Theme.disabledTextColor
+                    text: "Show each screen's slice of the whole desktop. Enable 'Same wallpaper "
+                        + "on all screens' for a continuous image. Each screen renders the full desktop."
                 }
             }
 

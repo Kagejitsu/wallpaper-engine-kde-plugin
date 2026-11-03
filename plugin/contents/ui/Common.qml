@@ -27,7 +27,7 @@ QtObject {
         Mpv
     }
 
-    readonly property string version: '0.6.0'
+    readonly property string version: '0.8.0'
 
     readonly property string repo_url: 'https://github.com/RainyPixel/wallpaper-engine-kde-plugin'
 
@@ -214,6 +214,20 @@ QtObject {
     function getGlobalConfigPath(steamLibrary) {
         return steamLibrary + "/steamapps/common/wallpaper_engine/config.json";
     }
+    function getProjectDirectory(source, workshopid, projectDirs) {
+        const path = urlNative(String(source));
+        for (const dirs of projectDirs) {
+            for (const dir of (Array.isArray(dirs) ? dirs : [dirs])) {
+                const project = urlNative(String(dir)).replace(/\/$/, "") + "/" + workshopid;
+                if (path.startsWith(project + "/")) return localFileUrl(project);
+            }
+        }
+        // Custom projects can live outside the detected Steam libraries.
+        const marker = "/" + workshopid + "/";
+        const index = workshopid ? path.lastIndexOf(marker) : -1;
+        return localFileUrl(index >= 0 ? path.slice(0, index + marker.length - 1)
+                                      : path.slice(0, path.lastIndexOf('/')));
+    }
     function getWorkshopUrl(workshopid) {
         return "https://steamcommunity.com/sharedfiles/filedetails/?id=" + workshopid;
     }
@@ -231,10 +245,12 @@ QtObject {
     }
 
     function packWallpaperSource(model) {
-        // The source is stored as a URL-typed config entry, where a raw '#' or '?'
-        // in a file name would start a fragment/query and cut the name off.
-        const file = String(model.file).replace(/%/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F');
+        // Project files are native names; keep separators while escaping URL delimiters.
+        const file = String(model.file).split('/').map(encodeURIComponent).join('/');
         return model.path ? `${model.path}/${file}+${model.type}` : '';
+    }
+    function localFileUrl(path) {
+        return path ? 'file://' + path.split('/').map(encodeURIComponent).join('/') : '';
     }
     function unpackWallpaperSource(source) {
         const match = source.match(regex_source);
@@ -242,6 +258,20 @@ QtObject {
             path: match ? match[1] : '',
             type: match ? match[2] : ''
         };
+    }
+
+    function desktopGeometry(screens) {
+        if(!screens.length)
+            return Qt.rect(0, 0, 0, 0);
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for(let i = 0; i < screens.length; i++) {
+            const screen = screens[i];
+            x0 = Math.min(x0, screen.virtualX);
+            y0 = Math.min(y0, screen.virtualY);
+            x1 = Math.max(x1, screen.virtualX + screen.width);
+            y1 = Math.max(y1, screen.virtualY + screen.height);
+        }
+        return Qt.rect(x0, y0, x1 - x0, y1 - y0);
     }
 
     function loadCustomConf(data) {
@@ -379,12 +409,20 @@ QtObject {
     }
     
     function urlNative(url) {
-        const str = url.toString().replace(/%23/g, '#').replace(/%3F/g, '?').replace(/%25/g, '%');
+        const str = url.toString();
+        let path;
         if(str.startsWith('file://')) {
-            return str.slice(7);
+            path = str.slice(7);
         } else if(str.startsWith('file:')) {
-            return str.slice(5);
+            path = str.slice(5);
+        } else {
+            return str;
         }
-        return str;
+        try {
+            return decodeURIComponent(path);
+        } catch(e) {
+            // Legacy paths can contain a literal, unescaped percent sign.
+            return path;
+        }
     }
 }

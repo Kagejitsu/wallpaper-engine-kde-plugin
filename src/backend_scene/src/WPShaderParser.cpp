@@ -19,7 +19,7 @@
 
 static constexpr std::string_view SHADER_PLACEHOLD { "__SHADER_PLACEHOLD__" };
 
-// bumped: spvs01 held fragment shaders with vertex-only builtins
+// Invalidate shaders generated before the stage and conversion fixes.
 #define SHADER_DIR    "spvs02"
 #define SHADER_SUFFIX "spvs"
 
@@ -47,7 +47,6 @@ static constexpr const char* pre_shader_code = R"(#version 330
 #define ddx dFdx
 #define ddy(x) dFdy(-(x))
 #define saturate(x) (clamp(x, 0.0, 1.0))
-
 
 #define float1 float
 #define float2 vec2
@@ -97,7 +96,8 @@ inline std::string LoadGlslInclude(fs::VFS& vfs, const std::string& input) {
     std::string::size_type linePos = std::string::npos;
 
     while (linePos = input.find("#include", pos), linePos != std::string::npos) {
-        auto lineEnd  = input.find_first_of('\n', linePos);
+        auto lineEnd = input.find_first_of('\n', linePos);
+        if (lineEnd == std::string::npos) lineEnd = input.size();
         auto lineSize = lineEnd - linePos;
         auto lineStr  = input.substr(linePos, lineSize);
         output.append(input.substr(pos, linePos - pos));
@@ -166,13 +166,11 @@ inline void ParseWPShader(const std::string& src, WPShaderInfo* pWPShaderInfo,
                         i32 index { 0 };
                         STRTONUM(name.substr(9), index);
                         if (! wput.default_.empty()) defTexs.push_back({ index, wput.default_ });
-                        if (! wput.combo.empty()) {
-                            if (index >= texcount)
-                                combos[wput.combo] = "0";
-                            else
-                                combos[wput.combo] = "1";
-                        }
-                        if (index < texcount && texinfos[(usize)index].enabled) {
+                        // Effect inputs can have empty slots between bound textures.
+                        const bool enabled =
+                            index >= 0 && index < texcount && texinfos[(usize)index].enabled;
+                        if (! wput.combo.empty()) combos[wput.combo] = enabled ? "1" : "0";
+                        if (enabled) {
                             auto& compos = texinfos[(usize)index].composEnabled;
 
                             usize num = std::min(std::size(compos), std::size(wput.components));
@@ -238,16 +236,15 @@ inline usize FindIncludeInsertPos(const std::string& src, usize startPos) {
         return std::string::npos;
     };
     auto searchLast = [](const std::string& p, const auto& re) {
-        auto        startpos = p.begin();
-        std::smatch match;
-        while (startpos < p.end() && std::regex_search(startpos, p.end(), match, re)) {
-            startpos++;
-            startpos += match.position();
-        }
-        return startpos >= p.end() ? std::string::npos : usize(startpos - p.begin());
+        usize pos = std::string::npos;
+        for (auto it = std::sregex_iterator(p.begin(), p.end(), re); it != std::sregex_iterator();
+             ++it)
+            pos = (usize)it->position();
+        return pos;
     };
     auto nextLinePos = [](const std::string& p, usize pos) {
-        return p.find_first_of('\n', pos) + 1;
+        auto end = p.find_first_of('\n', pos);
+        return end == std::string::npos ? p.size() : end + 1;
     };
 
     usize mainPos  = src.find("void main(");
@@ -256,10 +253,31 @@ inline usize FindIncludeInsertPos(const std::string& src, usize startPos) {
 
     usize pos;
     {
-        const std::regex reAfters(R"(\n(attribute|varying|uniform|struct) )");
-        usize            afterPos = searchLast(src, reAfters);
-        if (afterPos != std::string::npos) {
-            afterPos = nextLinePos(src, afterPos + 1);
+        // Keep offsets while ignoring comments when locating a declaration's end.
+        std::string      code = src;
+        const std::regex comments(R"(//[^\n]*|/\*[\s\S]*?\*/)");
+        for (auto it = std::sregex_iterator(src.begin(), src.end(), comments);
+             it != std::sregex_iterator();
+             ++it) {
+            for (usize i = (usize)it->position(); i < (usize)(it->position() + it->length()); ++i)
+                if (code[i] != '\n') code[i] = ' ';
+        }
+        const std::regex reAfters(R"((^|\n)[ \t]*(attribute|varying|uniform|struct)[ \t])");
+        const usize      declarationPos = searchLast(code, reAfters);
+        usize            afterPos       = declarationPos;
+        if (declarationPos != std::string::npos) {
+            afterPos         = nextLinePos(code, declarationPos + 1);
+            const auto start = code.find_first_not_of(" \t\r\n", declarationPos);
+            if (start != std::string::npos && code.compare(start, 6, "struct") == 0) {
+                const auto open = code.find_first_of("{;", start);
+                if (open != std::string::npos && code[open] == '{') {
+                    int depth = 1;
+                    for (usize i = open + 1; depth > 0 && i < code.size(); ++i) {
+                        if (code[i] == '{') ++depth;
+                        if (code[i] == '}' && --depth == 0) afterPos = nextLinePos(src, i);
+                    }
+                }
+            }
         }
         pos = std::min({ NposToZero(afterPos), mainPos });
     }
@@ -320,37 +338,6 @@ inline std::string Preprocessor(const std::string& in_src, ShaderType type, cons
         src.swap(lf);
         if (! src.empty() && src.back() != '\n') src += '\n';
     }
-    // Workshop shaders (and WE's own headers) sometimes carry a stray #endif or
-    // #else at nesting depth zero. WE's preprocessor ignores it; glslang's
-    // silently drops everything after it (losing main()'s closing brace ->
-    // "unexpected end of file"). Blank such lines.
-    {
-        std::regex  re_open(R"(^\s*#\s*if(def|ndef)?\b)");
-        std::regex  re_close(R"(^\s*#\s*endif\b)");
-        std::regex  re_else(R"(^\s*#\s*(else|elif)\b)");
-        std::string out;
-        out.reserve(src.size());
-        int         depth = 0;
-        usize       pos   = 0;
-        while (pos < src.size()) {
-            usize       end  = src.find('\n', pos);
-            if (end == std::string::npos) end = src.size();
-            std::string line = src.substr(pos, end - pos);
-            if (std::regex_search(line, re_open)) {
-                depth++;
-            } else if (std::regex_search(line, re_close)) {
-                if (depth == 0) line = "// stray #endif removed";
-                else depth--;
-            } else if (std::regex_search(line, re_else)) {
-                if (depth == 0) line = "// stray #else removed";
-            }
-            out += line;
-            out += '\n';
-            pos = end + 1;
-        }
-        src.swap(out);
-    }
-
     // workaround #require directive
     {
         std::regex re_require("(^|\r?\n)#require (.+)(\r?\n)");
@@ -544,21 +531,112 @@ inline std::string FixImplicitConversions(const std::string& src) {
         fixTrunc(vec2_vars, vec4_vars, "xy");
         fixTrunc(vec3_vars, vec4_vars, "xyz");
 
-        // Same truncation when a wider variable *leads* the initialiser of a
-        // narrower declaration: "vec2 d = v4 * s;" -> "vec2 d = v4.xy * s;".
-        // Anchored on the declared type so a name reused with another type in a
-        // different scope cannot be rewritten by mistake.
-        auto fixTruncDecl = [&result](const char* dst_type, const std::set<std::string>& src,
-                                      const char* swizzle) {
-            for (const auto& s : src) {
-                std::regex re(std::string("\\b(") + dst_type + R"()\s+(\w+)\s*=\s*()" + s +
-                              R"()\b(\s*[*+/-]))");
-                result = std::regex_replace(result, re, "$1 $2 = $3." + std::string(swizzle) + "$4");
+        // A vec2 constructor may have a scalar swizzle after its closing parenthesis.
+        // Only handle a terminal vec2 operand; following arithmetic may change its type.
+        auto             non_vector_vars = collect("float");
+        const std::regex non_vector_decl(
+            R"(\b(?:double|int|uint|bool|mat[234](?:x[234])?)\s+(\w+)\b)");
+        for (auto it = std::sregex_iterator(result.begin(), result.end(), non_vector_decl);
+             it != std::sregex_iterator();
+             ++it)
+            non_vector_vars.insert((*it)[1].str());
+        for (const auto* vars : { &vec3_vars, &vec4_vars }) {
+            for (const auto& name : *vars) {
+                if (non_vector_vars.count(name)) continue;
+                const std::regex operand("\\b(" + name + R"()(\s*[-+*/]\s*)(\(*\s*vec2\s*\())");
+                usize            pos = 0;
+                std::smatch      match;
+                while (std::regex_search(
+                    result.cbegin() + (isize)pos, result.cend(), match, operand)) {
+                    const usize begin = pos + (usize)match.position();
+                    const usize open  = begin + (usize)match.length() - 1;
+                    usize       end   = open + 1;
+                    int         depth = 1;
+                    for (; end < result.size() && depth > 0; ++end) {
+                        if (result[end] == '(') ++depth;
+                        if (result[end] == ')') --depth;
+                    }
+                    const auto prefix = match[3].str();
+                    usize      groups = (usize)std::count(prefix.begin(), prefix.end(), '(') - 1;
+                    while (end < result.size()) {
+                        if (std::isspace((unsigned char)result[end])) {
+                            ++end;
+                            continue;
+                        }
+                        if (groups > 0 && result[end] == ')') {
+                            --groups;
+                            ++end;
+                            continue;
+                        }
+                        break;
+                    }
+                    const auto before =
+                        result.find_last_not_of(" \t\r\n", begin == 0 ? 0 : begin - 1);
+                    if (depth == 0 && groups == 0 &&
+                        (begin == 0 || before == std::string::npos || result[before] != '.') &&
+                        (end == result.size() || result[end] == ';' || result[end] == ',' ||
+                         result[end] == ')')) {
+                        result.insert(begin + name.size(), ".xy");
+                        end += 3;
+                    }
+                    pos = end;
+                }
             }
-        };
-        fixTruncDecl("vec2", vec3_vars, "xy");
-        fixTruncDecl("vec2", vec4_vars, "xy");
-        fixTruncDecl("vec3", vec4_vars, "xyz");
+        }
+
+        // Wrap complete initializers so mixed vector/matrix arithmetic keeps its type.
+        const std::regex declaration(R"(\b(vec[234])\s+\w+\s*=\s*)");
+        const std::regex next_declarator(R"(^\s*\w+\s*=\s*)");
+        const std::regex scalar(R"(^\s*[-+]?\s*(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?[fF]?\s*$)");
+        const std::regex texture(R"(^\s*texture(?:Lod)?\s*\()");
+        const std::regex leading_variable(R"(^\s*(\w+)\s*[-+*/])");
+        usize            pos = 0;
+        std::smatch      declaration_match;
+        while (std::regex_search(
+            result.cbegin() + (isize)pos, result.cend(), declaration_match, declaration)) {
+            const auto type = declaration_match[1].str();
+            usize      begin =
+                pos + (usize)declaration_match.position() + (usize)declaration_match.length();
+            while (true) {
+                usize end   = begin;
+                int   depth = 0;
+                for (; end < result.size(); ++end) {
+                    const char c = result[end];
+                    if (depth == 0 && (c == ',' || c == ';')) break;
+                    if (c == '(' || c == '[') ++depth;
+                    if (c == ')' || c == ']') --depth;
+                    if (depth < 0 || c == '{' || c == '}') break;
+                }
+                if (end == result.size() || depth != 0 ||
+                    (result[end] != ',' && result[end] != ';')) {
+                    pos = end;
+                    break;
+                }
+                const auto  initializer = result.substr(begin, end - begin);
+                std::smatch variable;
+                bool        wider_variable = false;
+                if (std::regex_search(initializer, variable, leading_variable)) {
+                    const auto name = variable[1].str();
+                    wider_variable =
+                        ! non_vector_vars.count(name) &&
+                        (vec4_vars.count(name) || (type == "vec2" && vec3_vars.count(name)));
+                }
+                if (std::regex_match(initializer, scalar) ||
+                    (type != "vec4" &&
+                     (std::regex_search(initializer, texture) || wider_variable))) {
+                    result.insert(end, ")");
+                    result.insert(begin, type + "(");
+                    end += type.size() + 2;
+                }
+                pos = end + 1;
+                if (result[end] != ',') break;
+                std::smatch next;
+                if (! std::regex_search(
+                        result.cbegin() + (isize)pos, result.cend(), next, next_declarator))
+                    break;
+                begin = pos + (usize)next.length();
+            }
+        }
     }
 
     // Fix: HLSL pow(scalar, vecN) broadcasts the scalar; GLSL requires matching genType.
@@ -580,27 +658,6 @@ inline std::string FixImplicitConversions(const std::string& src) {
     {
         std::regex re(R"(\bint\s+(\w+)\s*=\s*(step\s*\([^;]*\))\s*;)");
         result = std::regex_replace(result, re, "float $1 = $2;");
-    }
-
-    // Fix: HLSL initialises vectors from a scalar literal ("vec2 a = 0.0, b = 0.0;");
-    // GLSL needs the constructor. Only literal initialisers directly after '='
-    // are touched, in every declarator of a vecN declaration.
-    {
-        std::regex  decl(R"(\b(vec[234])(\s+[A-Za-z_][^;(){}]*=[^;]*);)");
-        std::regex  init(R"((\b[A-Za-z_]\w*\s*=\s*)([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)(\s*(?:,|$)))");
-        std::string out;
-        auto        last = result.cbegin();
-        for (auto it = std::sregex_iterator(result.begin(), result.end(), decl);
-             it != std::sregex_iterator();
-             ++it) {
-            const auto& m    = *it;
-            const auto  type = m[1].str();
-            out.append(last, m[0].first);
-            out += type + std::regex_replace(m[2].str(), init, "$1" + type + "($2)$3") + ";";
-            last = m[0].second;
-        }
-        out.append(last, result.cend());
-        result = std::move(out);
     }
 
     return result;
@@ -664,6 +721,7 @@ std::string WPShaderParser::PreShaderSrc(fs::VFS& vfs, const std::string& src,
     while (pos = src.find("#include", pos), pos != std::string::npos) {
         auto begin = pos;
         pos        = src.find_first_of('\n', pos);
+        if (pos == std::string::npos) pos = src.size();
         newsrc.replace(begin, pos - begin, pos - begin, ' ');
         include.append(src.substr(begin, pos - begin) + "\n");
     }

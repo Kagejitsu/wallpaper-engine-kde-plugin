@@ -5,6 +5,7 @@ A wallpaper plugin integrating [Wallpaper Engine](https://store.steampowered.com
 - **Native file operations** — C++, no Python
 - **KDE 6.5+ theme reactivity** — UI stays visible when switching between light and dark themes
 - **Plasma 6 / Qt 6**
+- **Span Across Screens** — show each screen's part of one desktop-sized wallpaper
 
 ## Hyprland and Omarchy
 
@@ -89,6 +90,15 @@ sudo cmake --install build
 systemctl --user restart plasma-plasmashell.service
 ```
 
+To run native, scene parser, shader compiler and QML tests, configure with
+`-DBUILD_TESTS=ON`, build, then run `ctest --test-dir build --output-on-failure`.
+QML tests additionally need Qt 6.7+ Quick Test, Quick Controls/Layouts and Kirigami
+runtime modules.
+
+For native scene source and GPU lifetime tests, also configure with
+`-DWEKDE_GPU_TESTS=ON` and run CTest from an OpenGL/Vulkan desktop session.
+These tests use local synthetic scenes and do not need Steam assets.
+
 #### Build RPM package (Fedora)
 
 Useful for rpm-ostree/Bazzite systems where layered packages survive updates.
@@ -135,6 +145,11 @@ The Steam library is detected automatically, including Flatpak and Snap installs
 other drives. Wallpapers from every library are listed together. Use the folder button on the
 Wallpapers tab to override the detected library, for example to pick a second Steam installation.
 
+Enable **Span Across Screens** under Display to lay out a wallpaper over the bounding rectangle
+of all screens. Use **Same wallpaper on all screens** and the same Display mode for a continuous
+image. Each backend uses the full desktop size; compatible scenes can share rendering with
+**Mirror Scene**. The option is off by default.
+
 > **Note:** After an rpm-ostree/Bazzite install you may need to reboot before the plugin starts working. For cmake installs, restarting plasmashell is enough: `systemctl --user restart plasma-plasmashell.service`
 
 If the list stays empty and you copied the plugin into
@@ -171,12 +186,22 @@ as soon as either one is updated.
 ### Scene (2D)
 Supported by Vulkan 1.1. Requires *Wallpaper Engine* installed for assets.
 
+Text layers and SceneScript are not implemented. Controls for scripted clocks,
+dates and scripted audio reactions therefore have no effect.
+
 ### Web
 Basic web APIs supported. WebGL may not work properly.
 
 ### Video
 - **QtMultimedia** (default) — uses GStreamer
 - **MPV** — requires plugin lib compilation
+
+Video embedded in a scene's `.tex` file (a "video texture") is decoded with FFmpeg and drawn
+as that layer's texture, so the layer keeps its position, effects and draw order and follows
+the scene's pause and speed. It needs FFmpeg's development files at build time (installed by
+the dependency commands above; CMake reports `Video textures: enabled`). Without them, or for
+a video FFmpeg cannot decode, the layer shows a transparent placeholder and the other layers
+still render. Ordinary video wallpapers are unaffected.
 
 ## Acknowledgments
 - [RePKG](https://github.com/notscuffed/repkg)

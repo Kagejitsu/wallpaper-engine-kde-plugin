@@ -7,6 +7,8 @@
 #include "Utils/Logging.h"
 #include "Utils/AutoDeletor.hpp"
 #include "Resource.hpp"
+#include "VideoTexture.hpp"
+#include "Fs/VFS.h"
 #include "PassCommon.hpp"
 #include "PassCache.hpp"
 #include "Interface/IImageParser.h"
@@ -58,9 +60,9 @@ std::optional<vvk::RenderPass> CreateRenderPass(const vvk::Device& device, VkFor
     // or sampled it; wait for those writes, not just for fragment shading, or the
     // GPU can overlap the passes tile by tile (write-after-write on the canvas).
     VkSubpassDependency dependency {
-        .srcSubpass    = VK_SUBPASS_EXTERNAL,
-        .dstSubpass    = 0,
-        .srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        .srcSubpass   = VK_SUBPASS_EXTERNAL,
+        .dstSubpass   = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                         VK_PIPELINE_STAGE_TRANSFER_BIT,
         .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -108,6 +110,7 @@ static void UpdateUniform(StagingBuffer* buf, const StagingBufferRef& bufref,
 }
 
 void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingResources& rr) {
+    m_samples_video = false;
     m_desc.vk_textures.resize(m_desc.textures.size());
     for (usize i = 0; i < m_desc.textures.size(); i++) {
         auto& tex_name = m_desc.textures[i];
@@ -122,10 +125,19 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             img_slots.slots = { opt.value() };
         } else {
             auto image = scene.imageParser->Parse(tex_name);
-            if (image) {
+            if (image && image->header.video && rr.videos != nullptr && scene.vfs) {
+                // Video texture: sample the decoded frames. The pass then
+                // changes every frame and must never be cached as static.
+                if (auto* live = rr.videos->Acquire(
+                        tex_name, *scene.vfs, *image->header.video, image->header.sample)) {
+                    img_slots       = *live;
+                    m_samples_video = true;
+                }
+            }
+            if (image && img_slots.slots.empty()) {
                 img_slots =
                     device.asset_cache().CreateTexShared(*image, rr.screen_token, scene.scene_id);
-            } else {
+            } else if (! image) {
                 LOG_ERROR("parse tex \"%s\" failed", tex_name.c_str());
             }
         }
@@ -183,6 +195,11 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
             i32 binding { -1 };
             if (exists(ref.binding_map, WE_GLTEX_NAMES[i]))
                 binding = (i32)ref.binding_map.at(WE_GLTEX_NAMES[i]).binding;
+            if (binding >= 0 && m_desc.vk_textures[i].slots.empty()) {
+                LOG_ERROR("required texture \"%s\" is unavailable; skipping pass",
+                          m_desc.textures[i].c_str());
+                return;
+            }
             m_desc.vk_tex_binding.push_back(binding);
         }
     }
@@ -197,7 +214,7 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
     // same name (effect ping-pong copy, later composite) overwrites the one
     // GPU image; skipping the producer then leaves the base layer black.
     {
-        bool inputs_static = true;
+        bool inputs_static = ! m_samples_video;
         for (auto& in_name : m_desc.textures) {
             if (in_name.empty()) continue;
             if (IsSpecTex(in_name)) {
@@ -444,7 +461,7 @@ void CustomShaderPass::prepare(Scene& scene, const Device& device, RenderingReso
     {
         auto& sc           = scene.clearColor;
         m_desc.clear_value = VkClearValue {
-            .color = { sc[0], sc[1], sc[2], scene.clearAlpha },
+            .color = { sc[0], sc[1], sc[2], 1.0f },
         };
         if (m_desc.node->Mesh()->Material()->clearTarget)
             m_desc.clear_value = VkClearValue { .color = { 0.0f, 0.0f, 0.0f, 0.0f } };
@@ -498,14 +515,16 @@ void CustomShaderPass::execute(const Device&, RenderingResources& rr) {
         cmd.PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, *m_desc.pipeline.layout, 0, wset);
 
         image_barriers.push_back(VkImageMemoryBarrier {
-            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .pNext            = nullptr,
-            .srcAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-            .dstAccessMask    = VK_ACCESS_SHADER_READ_BIT,
-            .oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .image            = img.handle,
-            .subresourceRange = base_srang,
+            .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext         = nullptr,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = img.handle,
+            .subresourceRange    = base_srang,
         });
     }
 
@@ -515,7 +534,7 @@ void CustomShaderPass::execute(const Device&, RenderingResources& rr) {
         cmd.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                            VK_DEPENDENCY_BY_REGION_BIT,
+                            0,
                             {},
                             {},
                             image_barriers);
@@ -594,7 +613,7 @@ void CustomShaderPass::destory(const Device&, RenderingResources& rr) {
             buf->unallocateSubRef(bufref);
         }
     }
-    rr.dyn_buf->unallocateSubRef(m_desc.ubo_buf);
+    if (m_desc.ubo_buf) rr.dyn_buf->unallocateSubRef(m_desc.ubo_buf);
 }
 
 void CustomShaderPass::setDescTex(u32 index, std::string_view tex_key) {

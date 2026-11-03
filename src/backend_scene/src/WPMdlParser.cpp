@@ -8,20 +8,31 @@
 #include "SpecTexs.hpp"
 #include "wpscene/WPMaterial.h"
 #include "WPShaderParser.hpp"
+#include <optional>
+#include <cmath>
 
 using namespace wallpaper;
 
 namespace
 {
+struct TruncatedMdl {};
 
-WPPuppet::PlayMode ToPlayMode(std::string_view m) {
+class MdlStream : public fs::MemBinaryStream {
+public:
+    using fs::MemBinaryStream::MemBinaryStream;
+    usize Read(void* buffer, usize size) override {
+        if (size > (usize)(Size() - Tell())) throw TruncatedMdl {};
+        return fs::MemBinaryStream::Read(buffer, size);
+    }
+};
+
+std::optional<WPPuppet::PlayMode> ToPlayMode(std::string_view m) {
     if (m == "loop" || m.empty()) return WPPuppet::PlayMode::Loop;
     if (m == "mirror") return WPPuppet::PlayMode::Mirror;
     if (m == "single") return WPPuppet::PlayMode::Single;
 
     LOG_ERROR("unknown puppet animation play mode \"%s\"", m.data());
-    assert(m == "loop");
-    return WPPuppet::PlayMode::Loop;
+    return std::nullopt;
 }
 } // namespace
 
@@ -43,22 +54,18 @@ constexpr uint32_t alt_extra_words                      = 7;
 
 constexpr uint32_t singile_bone_frame = 4 * 9;
 
-bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
+bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) try {
     auto str_path = std::string(path);
     auto pfile    = vfs.Open("/assets/" + str_path);
     if (! pfile) return false;
-    auto  memfile = fs::MemBinaryStream(*pfile);
-    auto& f       = memfile;
-    // Reads past EOF return 0 instead of failing, so every search and every
-    // count taken from the file is checked against what is actually left;
-    // otherwise an unexpected layout spins the loader thread (and plasmashell
-    // hangs joining it).
-    auto remaining = [&f]() -> u64 {
-        const auto left = (i64)f.Size() - (i64)f.Tell();
-        return left > 0 ? (u64)left : 0;
+    auto  memfile   = MdlStream(*pfile);
+    auto& f         = memfile;
+    auto  remaining = [&f]() -> u64 {
+        return (u64)(f.Size() - f.Tell());
     };
 
     mdl.mdlv = ReadMDLVesion(f);
+    if (mdl.mdlv <= 0) return false;
 
     int32_t mdl_flag = f.ReadInt32();
     if (mdl_flag == 9) {
@@ -143,7 +150,7 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     {
         char ring[4] = { 0, 0, 0, 0 };
         char c;
-        while (f.Read(&c, 1) == 1) {
+        while (remaining() > 0 && f.Read(&c, 1) == 1) {
             ring[0] = ring[1];
             ring[1] = ring[2];
             ring[2] = ring[3];
@@ -171,6 +178,10 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     auto& bones = mdl.puppet->bones;
     auto& anims = mdl.puppet->anims;
 
+    if ((u64)bones_num * 78 > remaining()) {
+        LOG_ERROR("mdl '%s': bone count %u exceeds file", str_path.c_str(), bones_num);
+        return false;
+    }
     bones.resize(bones_num);
     for (uint i = 0; i < bones_num; i++) {
         auto&       bone = bones[i];
@@ -273,98 +284,114 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
     // Animations are optional: a layout we do not understand must not cost the
     // whole puppet (mesh + bones already parsed), just its animation.
     auto parse_anims = [&]() -> bool {
-        if (mdType == "MDLA" && mdVersion.length() > 0) {
-            mdl.mdla = std::stoi(mdVersion);
-            if (mdl.mdla != 0) {
-                uint end_size = f.ReadUint32();
-                (void)end_size;
-
-                uint anim_num = f.ReadUint32();
-                if (anim_num > remaining()) {
-                    LOG_ERROR("mdl '%s': bad animation count %u", str_path.c_str(), anim_num);
+        try {
+            if (mdType == "MDLA" && mdVersion.length() > 0) {
+                auto [end, error] =
+                    std::from_chars(mdVersion.data(), mdVersion.data() + mdVersion.size(), mdl.mdla);
+                if (error != std::errc() || end != mdVersion.data() + mdVersion.size()) {
+                    LOG_ERROR("mdl '%s': invalid animation version", str_path.c_str());
                     return false;
                 }
-                anims.resize(anim_num);
-                for (auto& anim : anims) {
-                    // there can be a variable number of 32-bit 0s between animations,
-                    // and (MDLA 6) a single stray zero byte right before the id: reading
-                    // through it shifts the id by 8 bits (97 -> 24832) and desyncs the
-                    // rest of the record. Skip whole zero words, then a lone zero byte
-                    // whenever the word starting there is not zero.
-                    anim.id = 0;
-                    while (remaining() >= 4) {
-                        u32 word = f.ReadUint32();
-                        if (word == 0) continue;
-                        if ((word & 0xFFu) == 0) {
-                            f.SeekCur(-3); // drop the stray byte, re-read from the next one
-                            continue;
+                if (mdl.mdla != 0) {
+                    uint end_size = f.ReadUint32();
+                    (void)end_size;
+
+                    uint anim_num = f.ReadUint32();
+                    if ((u64)anim_num * 26 > remaining()) {
+                        LOG_ERROR("mdl '%s': bad animation count %u", str_path.c_str(), anim_num);
+                        return false;
+                    }
+                    anims.resize(anim_num);
+                    for (auto& anim : anims) {
+                        // there can be a variable number of 32-bit 0s between animations,
+                        // and (MDLA 6) a single stray zero byte right before the id: reading
+                        // through it shifts the id by 8 bits (97 -> 24832) and desyncs the
+                        // rest of the record. Skip whole zero words, then a lone zero byte
+                        // whenever the word starting there is not zero.
+                        anim.id = 0;
+                        while (remaining() >= 4) {
+                            u32 word = f.ReadUint32();
+                            if (word == 0) continue;
+                            if ((word & 0xFFu) == 0) {
+                                f.SeekCur(-3); // drop the stray byte, re-read from the next one
+                                continue;
+                            }
+                            anim.id = (i32)word;
+                            break;
                         }
-                        anim.id = (i32)word;
-                        break;
-                    }
 
-                    if (anim.id <= 0) {
-                        LOG_ERROR("wrong anime id %d", anim.id);
-                        return false;
-                    }
-                    f.ReadInt32();
-                    anim.name = f.ReadStr();
-                    if (anim.name.empty()) {
-                        anim.name = f.ReadStr();
-                    }
-                    anim.mode   = ToPlayMode(f.ReadStr());
-                    anim.fps    = f.ReadFloat();
-                    anim.length = f.ReadInt32();
-                    f.ReadInt32();
-
-                    uint32_t b_num = f.ReadUint32();
-                    if ((u64)b_num * 8 > remaining()) {
-                        LOG_ERROR("mdl '%s': bad bone track count %u", str_path.c_str(), b_num);
-                        return false;
-                    }
-                    anim.bframes_array.resize(b_num);
-                    for (auto& bframes : anim.bframes_array) {
+                        if (anim.id <= 0) {
+                            LOG_ERROR("wrong anime id %d", anim.id);
+                            return false;
+                        }
                         f.ReadInt32();
-                        uint32_t byte_size = f.ReadUint32();
-                        uint32_t num       = byte_size / singile_bone_frame;
-                        if (byte_size > remaining() || byte_size % singile_bone_frame != 0) {
-                            LOG_ERROR("wrong bone frame size %d", byte_size);
+                        anim.name = f.ReadStr();
+                        if (anim.name.empty()) {
+                            anim.name = f.ReadStr();
+                        }
+                        const auto mode = ToPlayMode(f.ReadStr());
+                        if (! mode) return false;
+                        anim.mode   = *mode;
+                        anim.fps    = f.ReadFloat();
+                        anim.length = f.ReadInt32();
+                        if (anim.length <= 0 || ! std::isfinite(anim.fps) || anim.fps <= 0.0) {
+                            LOG_ERROR("mdl '%s': invalid animation timing", str_path.c_str());
                             return false;
                         }
-                        bframes.frames.resize(num);
-                        for (auto& frame : bframes.frames) {
-                            for (auto& v : frame.position) v = f.ReadFloat();
-                            for (auto& v : frame.angle) v = f.ReadFloat();
-                            for (auto& v : frame.scale) v = f.ReadFloat();
-                        }
-                    }
+                        f.ReadInt32();
 
-                    // in the alternative MDL format there are 2 empty bytes followed
-                    // by a variable number of 32-bit 0s between animations. We'll read
-                    // the two bytes now so that the cursor is aligned to read through the
-                    // 32-bit 0s in the next iteration
-                    if (alt_mdl_format) {
-                        f.ReadUint8();
-                        f.ReadUint8();
-                    } else if (mdl.mdla == 3) {
-                        // In MDLA version 3 there is an extra 8-bit zero between animations.
-                        // This will cause the parser to be misaligned moving forward if we don't handle
-                        // it here.
-                        f.ReadUint8();
-                    } else {
-                        uint32_t unk_extra_uint = f.ReadUint32();
-                        if ((u64)unk_extra_uint * 5 > remaining()) {
-                            LOG_ERROR("mdl '%s': bad extra count %u", str_path.c_str(), unk_extra_uint);
+                        uint32_t b_num = f.ReadUint32();
+                        if ((u64)b_num * 8 > remaining()) {
+                            LOG_ERROR("mdl '%s': bad bone track count %u", str_path.c_str(), b_num);
                             return false;
                         }
-                        for (uint i = 0; i < unk_extra_uint; i++) {
-                            f.ReadFloat();
-                            // data is like: {"$$hashKey":"object:2110","frame":1,"name":"random_anim"}
-                            std::string unk_extra = f.ReadStr();
+                        anim.bframes_array.resize(b_num);
+                        for (auto& bframes : anim.bframes_array) {
+                            f.ReadInt32();
+                            uint32_t byte_size = f.ReadUint32();
+                            uint32_t num       = byte_size / singile_bone_frame;
+                            if (byte_size > remaining() || byte_size % singile_bone_frame != 0 ||
+                                num < (uint32_t)anim.length) {
+                                LOG_ERROR("wrong bone frame size %d", byte_size);
+                                return false;
+                            }
+                            bframes.frames.resize(num);
+                            for (auto& frame : bframes.frames) {
+                                for (auto& v : frame.position) v = f.ReadFloat();
+                                for (auto& v : frame.angle) v = f.ReadFloat();
+                                for (auto& v : frame.scale) v = f.ReadFloat();
+                            }
+                        }
+
+                        // in the alternative MDL format there are 2 empty bytes followed
+                        // by a variable number of 32-bit 0s between animations. We'll read
+                        // the two bytes now so that the cursor is aligned to read through the
+                        // 32-bit 0s in the next iteration
+                        if (alt_mdl_format) {
+                            f.ReadUint8();
+                            f.ReadUint8();
+                        } else if (mdl.mdla == 3) {
+                            // In MDLA version 3 there is an extra 8-bit zero between animations.
+                            // This will cause the parser to be misaligned moving forward if we don't handle
+                            // it here.
+                            f.ReadUint8();
+                        } else {
+                            uint32_t unk_extra_uint = f.ReadUint32();
+                            if ((u64)unk_extra_uint * 5 > remaining()) {
+                                LOG_ERROR("mdl '%s': bad extra count %u", str_path.c_str(), unk_extra_uint);
+                                return false;
+                            }
+                            for (uint i = 0; i < unk_extra_uint; i++) {
+                                f.ReadFloat();
+                                // data is like: {"$$hashKey":"object:2110","frame":1,"name":"random_anim"}
+                                std::string unk_extra = f.ReadStr();
+                            }
                         }
                     }
                 }
             }
+        } catch (const TruncatedMdl&) {
+            return false;
         }
         return true;
     };
@@ -383,6 +410,9 @@ bool WPMdlParser::Parse(std::string_view path, fs::VFS& vfs, WPMdl& mdl) {
              mdl.puppet->bones.size(),
              mdl.puppet->anims.size());
     return true;
+} catch (const TruncatedMdl&) {
+    LOG_ERROR("mdl '%.*s': truncated data", (int)path.size(), path.data());
+    return false;
 }
 
 void WPMdlParser::GenPuppetMesh(SceneMesh& mesh, const WPMdl& mdl) {

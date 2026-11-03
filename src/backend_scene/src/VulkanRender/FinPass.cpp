@@ -69,12 +69,24 @@ std::optional<vvk::RenderPass> CreateRenderPass(const vvk::Device& device, VkFor
         .pColorAttachments    = &attachment_ref,
     };
 
+    // Chain the acquire semaphore wait through the initial attachment layout transition.
+    VkSubpassDependency dependency {
+        .srcSubpass    = VK_SUBPASS_EXTERNAL,
+        .dstSubpass    = 0,
+        .srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+
     VkRenderPassCreateInfo creatinfo {
         .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments    = &attachment,
         .subpassCount    = 1,
         .pSubpasses      = &subpass,
+        .dependencyCount = 1,
+        .pDependencies   = &dependency,
     };
     vvk::RenderPass pass;
     if (auto res = device.CreateRenderPass(creatinfo, pass); res == VK_SUCCESS) {
@@ -158,16 +170,6 @@ void FinPass::prepare(Scene& scene, const Device& device, RenderingResources& rr
         descriptor_info.push_descriptor = true;
         GraphicsPipeline pipeline;
         pipeline.toDefault();
-        // The host composites this image with alpha. Keep ordinary scenes opaque
-        // (alpha stays at the cleared 1.0); only a video-underlay scene writes alpha.
-        if (scene.clearAlpha >= 1.0f) {
-            VkPipelineColorBlendAttachmentState color_blend {
-                .blendEnable    = false,
-                .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                  VK_COLOR_COMPONENT_B_BIT,
-            };
-            pipeline.setColorBlendStates(spanone { color_blend });
-        }
         pipeline.addDescriptorSetInfo(spanone { descriptor_info })
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
             .addInputBindingDescription(spanone { bind_description })
@@ -186,7 +188,7 @@ void FinPass::prepare(Scene& scene, const Device& device, RenderingResources& rr
 
     {
         auto& sc           = scene.clearColor;
-        m_desc.clear_value = VkClearValue { { sc[0], sc[1], sc[2], scene.clearAlpha } };
+        m_desc.clear_value = VkClearValue { { sc[0], sc[1], sc[2], 1.0f } };
     }
     setPrepared();
 }
@@ -240,19 +242,21 @@ void FinPass::execute(const Device& device, RenderingResources& rr) {
         // without it whole tiles of the last layers drawn were missing from the
         // presented frame.
         VkImageMemoryBarrier canvas_bar {
-            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .pNext            = nullptr,
-            .srcAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
-            .dstAccessMask    = VK_ACCESS_SHADER_READ_BIT,
-            .oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .image            = m_desc.vk_result.handle,
-            .subresourceRange = base_srang,
+            .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext         = nullptr,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+            .oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image               = m_desc.vk_result.handle,
+            .subresourceRange    = base_srang,
         };
         cmd.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                            VK_DEPENDENCY_BY_REGION_BIT,
+                            0,
                             canvas_bar);
     }
 

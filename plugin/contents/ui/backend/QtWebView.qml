@@ -9,17 +9,35 @@ import "../js/qwebchannel_src.js" as WebChannelJs
 Item {
     id: webItem
     anchors.fill: parent
-    // bound to web.url only after the user scripts are registered (see below)
     property url source
+    property bool scriptsReady: false
     property bool hasLib: background.hasLib
     property int fps: background.fps
     property var readfile
 
-    onFpsChanged: {
-        if(webobj.loaded) {
-            webobj.generalProperties.fps = webItem.fps;
-            webobj.sigGeneralProperties(webobj.sigGeneralProperties);
+    property string userPropsJson: background.userPropsJson
+    property var projectProperties: ({})
+
+    function sendUserProperties() {
+        if (!webobj.loaded) return;
+        const saved = Utils.parseJson(userPropsJson) || {};
+        const properties = {};
+        for (const key of Object.keys(projectProperties)) {
+            const property = projectProperties[key];
+            if (property && typeof property === "object" && "value" in property)
+                properties[key] = {value: Object.prototype.hasOwnProperty.call(saved, key)
+                    ? saved[key] : property.value};
         }
+        webobj.sigUserProperties(properties);
+    }
+
+    onUserPropsJsonChanged: sendUserProperties()
+    onFpsChanged: {
+        if (webobj.loaded) webobj.sigGeneralProperties({fps: webItem.fps});
+    }
+    onSourceChanged: {
+        webobj.loaded = false;
+        projectProperties = {};
     }
 
     Image {
@@ -37,19 +55,22 @@ Item {
         property bool loaded: false
         // set by the page through the web channel when it registers an audio listener
         property bool audioWanted: false
-        property var userProperties 
-        property var generalProperties
         onLoadedChanged: {
-            if(!webobj.generalProperties)
-                webobj.generalProperties = {fps: 24};
-            webobj.sigGeneralProperties(webobj.generalProperties);
-            readfile(Common.urlNative(background.getWorkshopIDPath()) + "/project.json", function(text) { 
-                const json = Utils.parseJson(text);
-                webobj.userProperties = json.general.properties;
-                webobj.sigUserProperties(webobj.userProperties);
-            });
+            if (!loaded) return;
+            webobj.sigGeneralProperties({fps: webItem.fps});
+            const currentSource = String(webItem.source);
+            const projectUrl = background.getWorkshopIDPath() + "/project.json";
+            readfile(Common.urlNative(projectUrl)).then(text => {
+                if (!webobj.loaded || String(webItem.source) !== currentSource) return;
+                const project = Utils.parseJson(text);
+                const properties = project?.general?.properties;
+                webItem.projectProperties = properties && typeof properties === "object"
+                    && !Array.isArray(properties) ? properties : {};
+                webItem.sendUserProperties();
+            }).catch(error => console.error("Failed to load web properties: " + error));
         }
     }
+
     WebChannel {
         id: channel
         registeredObjects: [webobj]
@@ -66,6 +87,7 @@ Item {
     //WebView {
         id: web
         anchors.fill: parent
+        url: webItem.scriptsReady ? webItem.source : ""
         enabled: true
         audioMuted: background.mute
         activeFocusOnPress: false
@@ -90,6 +112,11 @@ Item {
         //    request.accepted = true;
         //}
         onLoadingChanged: (loadingInfo) => {
+            if (loadingInfo.status === WebEngineView.LoadStartedStatus) {
+                webobj.loaded = false;
+                webobj.audioWanted = false;
+                webItem.projectProperties = {};
+            }
             if(loadingInfo.status == WebEngineView.LoadSucceededStatus) {
                 // check pause after load
                 if(paused) {
@@ -112,19 +139,23 @@ Item {
         }
 
         Component.onCompleted: {
+            // Load the resource before insertion; sourceUrl can race the first navigation.
+            // The qrc copy is not always reachable inside plasmashell; fall back to
+            // the bundled one (Qt's own, GPL-2.0) rather than leave the page
+            // without properties and audio.
+            readfile(":/qtwebchannel/qwebchannel.js").then(script => {
+                if (!script) throw new Error("empty");
+                return String(script);
+            }).catch(error => {
+                console.warn("Qt WebChannel script not in qrc (" + error + "), using bundled copy");
+                return WebChannelJs.QWEBCHANNEL_SRC;
+            }).then(script => installScripts(script));
+        }
+        function installScripts(channelScript) {
             // One single-element list per script: on Qt 6.11 only the last
-            // element of a list passed to insert() is actually executed, and
-            // insert() does not accept a plain object.
-            userScripts.insert([{
-                    injectionPoint: WebEngineScript.DocumentCreation,
-                    worldId: WebEngineScript.MainWorld,
-                    name: "QWebChannel",
-                    // bundled copy (Qt's own, GPL-2.0): the qrc resource is not
-                    // available inside plasmashell, which left every web
-                    // wallpaper without properties and audio
-                    sourceCode: WebChannelJs.QWEBCHANNEL_SRC
-                }]);
-            userScripts.insert([{
+            // element of a list passed to insert() is actually executed.
+            userScripts.insert([
+                {
                     injectionPoint: WebEngineScript.DocumentCreation,
                     worldId: WebEngineScript.MainWorld,
                     name: "Audio",
@@ -137,12 +168,14 @@ Item {
                                 window.wallpaperRAed = listener;
                         }
                     `
-                }]);
-            userScripts.insert([{
+                }
+            ]);
+            userScripts.insert([
+                {
                     worldId: WebEngineScript.MainWorld,
                     injectionPoint: WebEngineScript.Deferred,
                     name: "ObjectInjector",
-                    sourceCode: `
+                    sourceCode: channelScript + `
                         new QWebChannel(qt.webChannelTransport, function(channel) {
                             window.wpeQml = channel.objects.wpeQml;
                             const wpeQml = window.wpeQml;
@@ -161,10 +194,9 @@ Item {
                         });
                         document.getElementsByTagName('body')[0].ondragstart = function() { return false; }
                         `
-                }]);
-            // Scripts must exist before navigation starts, or DocumentCreation
-            // scripts never run for the first document.
-            web.url = Qt.binding(function() { return webItem.source; });
+                }
+            ])
+            webItem.scriptsReady = true;
             background.nowBackend = 'QtWebEngine';
         }
 

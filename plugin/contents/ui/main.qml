@@ -8,20 +8,19 @@ WallpaperItem {
 Rectangle {
     id: background
     anchors.fill: parent
+    clip: true
     color: wallpaper.configuration.BackgroundColor
     
     // Steam libraries found on this machine, see FileHelper::detectSteam
     property var steamDetect: pyext.detect_steam(wallpaper.configuration.SteamLibraryPath)
     property string steamlibrary: {
-        // Qt.resolvedUrl('') gives this file's own url, so fall back on the
-        // native path and resolve only once there is one.
         const path = wallpaper.configuration.SteamLibraryPath || steamDetect.library;
-        return path ? Qt.resolvedUrl(path).toString() : '';
+        return Common.localFileUrl(path);
     }
     // SceneBackend reads assets as a QUrl and QUrl::toLocalFile() is empty for
     // a scheme-less one, so the detected native path has to be resolved too.
     property string steamAssets: steamDetect.assets
-        ? Qt.resolvedUrl(steamDetect.assets).toString()
+        ? Common.localFileUrl(steamDetect.assets)
         : Common.getAssetsPath(steamlibrary)
     // Global Mode: shared config (wallpaper choice + randomization) lives in
     // ~/.config/wekde/global.json instead of per-screen KConfig. globalRev is
@@ -42,6 +41,7 @@ Rectangle {
     property bool   cacheScenePasses: wallpaper.configuration.SceneCachePasses
     property bool   shareGpuContext: wallpaper.configuration.ShareGpuContext
     property bool   mirrorScene: wallpaper.configuration.MirrorScene
+    property bool   spanScreens: effCfg("SpanScreens", wallpaper.configuration.SpanScreens)
 
     property bool   randomizeWallpaper: effCfg("RandomizeWallpaper", wallpaper.configuration.RandomizeWallpaper)
     property bool   noRandomWhilePaused: effCfg("NoRandomWhilePaused", wallpaper.configuration.NoRandomWhilePaused)
@@ -56,7 +56,9 @@ Rectangle {
     property var curOpt: ({})
     property string workshopid: {
         const wid = effCfg("WallpaperWorkShopId", wallpaper.configuration.WallpaperWorkShopId);
-        pyext.read_wallpaper_config(wid).then((res) => this.curOpt = res);
+        pyext.read_wallpaper_config(wid).then(res => {
+            if (background.workshopid === wid) background.curOpt = res;
+        }).catch(error => console.error(error));
         return wid;
     }
     function get_opt_value(key, def) {
@@ -104,29 +106,21 @@ Rectangle {
     property int    perOptChanged: wallpaper.configuration.PerOptChanged
     onPerOptChangedChanged: {
         console.log("main.qml onPerOptChangedChanged, perOptChanged:", perOptChanged, "workshopid:", workshopid);
-        pyext.read_wallpaper_config(workshopid).then((res) => {
+        const wid = workshopid;
+        pyext.read_wallpaper_config(wid).then((res) => {
             console.log("main.qml read_wallpaper_config result:", JSON.stringify(res));
-            this.curOpt = res;
-        });
+            if (background.workshopid === wid) background.curOpt = res;
+        }).catch(error => console.error(error));
     }
 
     property bool   pauseOnGamemode: wallpaper.configuration.PauseOnGamemode
 
     // auto pause
-    property bool   ok: !windowModel.reqPause && !powerSource.reqPause && !(gamemodeLoader.item ? gamemodeLoader.item.reqPause : false)
+    property bool   ok: !ttyMonitor.sleeping && !windowModel.reqPause && !powerSource.reqPause && !(gamemodeLoader.item ? gamemodeLoader.item.reqPause : false)
 
-    // detect TTY switch and pause wallpaper(s)
+    // login1 PrepareForSleep is independent of the other pause reasons.
     TTYSwitchMonitor {
         id: ttyMonitor
-        onTtySwitch: {
-            if (sleep) {
-                console.log("Preparing for sleep (possibly a VT switch)");
-                this.pause();
-            } else {
-                console.log("Waking up (VT switch back)");
-                this.play();
-            }
-        }
     }
 
     Loader {
@@ -189,7 +183,8 @@ Rectangle {
     }
 
     function getWorkshopIDPath() {
-        return Common.getWorkshopDir(this.steamlibrary) + `/${this.workshopid}`;
+        return Common.getProjectDirectory(wallpaperPath, workshopid,
+            steamDetect.projectDirs.length ? steamDetect.projectDirs : Common.getProjectDirs(steamlibrary));
     }
 
     onMouseInputChanged: {
@@ -302,6 +297,7 @@ Rectangle {
     }
     Connections {
         target: globalCfg
+        function onPersistenceFailed(error) { console.error("Cannot update shared wallpaper settings:", error); }
         function onChanged(key, value) { background.globalRev++; }
         function onEnabledChanged()    { background.globalRev++; }
     }
@@ -368,8 +364,26 @@ Rectangle {
     // main  
     Item { 
         id: backendLoader
-        anchors.fill: parent
+        // Qt screen geometry and item geometry both use device-independent pixels.
+        readonly property rect desktop: Common.desktopGeometry(Qt.application.screens)
+        readonly property bool spanning: background.spanScreens && desktop.width > 0 && desktop.height > 0
+        x: spanning ? desktop.x - Screen.virtualX : 0
+        y: spanning ? desktop.y - Screen.virtualY : 0
+        width: spanning ? desktop.width : parent.width
+        height: spanning ? desktop.height : parent.height
         property var item: null
+
+        // Scene framebuffers take their size at creation; wait for geometry to settle.
+        onWidthChanged: sceneResizeTimer.restart()
+        onHeightChanged: sceneResizeTimer.restart()
+        Timer {
+            id: sceneResizeTimer
+            interval: 100
+            onTriggered: {
+                if(backendLoader.item && background.wallpaperType === 'scene')
+                    background.loadBackend();
+            }
+        }
 
         signal loaded
 
@@ -457,6 +471,7 @@ Rectangle {
     }
    
     function autoPause() {
+        if (!backendLoader.item) return;
         background.ok
             ? backendLoader.item.play()
             : backendLoader.item.pause();

@@ -60,6 +60,8 @@ public:
     std::unique_ptr<fs::VFS>             vfs;
 
     std::string scene_id { "unknown_id" };
+    // Keep mirror identity tied to the overrides used to parse this scene.
+    std::string user_props_json;
 
     bool first_frame_ok { false };
 
@@ -74,8 +76,6 @@ public:
     // this so it does not replace the parsed crop with the full ortho size.
     float                camera_zoom { 1.0f };
     std::array<float, 3> clearColor { 1.0f, 1.0f, 1.0f };
-    // 0 when the bottom layer is played underneath by the host (video underlay)
-    float clearAlpha { 1.0f };
 
     double elapsingTime { 0.0f }, frameTime { 0.0f };
     void   PassFrameTime(double t) {
